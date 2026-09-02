@@ -26,6 +26,7 @@ import {
   apiSaveRequirements,
   apiUploadBRDDocument,
 } from '../services/api';
+import ArchitectureWorkspace from '../components/ArchitectureWorkspace';
 import type { BRDArtifact, BRDDocument, BRDRequirementSet } from '../types';
 
 type ArtifactKind = BRDArtifact['artifact_type'];
@@ -294,10 +295,10 @@ export default function BRDStudio() {
         </div>
       )}
 
-      {(['business_flow', 'architecture'] as ArtifactKind[]).includes(workspace as ArtifactKind) && (
+      {workspace === 'business_flow' && (
         <section className="rounded-xl border border-border bg-surface overflow-hidden">
           {(() => {
-            const kind = workspace as ArtifactKind;
+            const kind = 'business_flow' as const;
             const meta = artifactMeta[kind];
             const Icon = meta.icon;
             const artifact = latestArtifacts[kind];
@@ -324,41 +325,28 @@ export default function BRDStudio() {
                 </div>
                 <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-5 p-5">
                   <div className="rounded-lg border border-border bg-surface-alt p-5 min-h-[360px]">
-                    {kind === 'business_flow' && (
-                      <div className="space-y-4">
-                        <div className="flex flex-wrap items-center gap-3">
-                          {renderListPayload((artifact?.payload.nodes as any[])?.map((node: any) => node.label || node.id))}
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {editedFlowNodes.map((node: any, index: number) => (
-                            <div key={node.id || index} className="rounded-lg border border-violet-100 bg-white p-3">
-                              <input value={node.label || ''} onChange={(event) => setEditedFlowNodes((nodes) => nodes.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} className="w-full rounded border border-violet-100 px-2 py-1 text-xs font-bold text-violet-700" aria-label={`Flow node ${index + 1} label`} />
-                              <textarea value={node.description || ''} onChange={(event) => setEditedFlowNodes((nodes) => nodes.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} className="mt-2 w-full rounded border border-violet-100 px-2 py-1 text-[11px] text-ink-faint" aria-label={`Flow node ${index + 1} description`} />
-                            </div>
-                          ))}
-                        </div>
-                        <div className="space-y-2">
-                          {editedFlowEdges.map((edge: any, index: number) => (
-                            <div key={`${edge.source}-${edge.target}-${index}`} className="grid grid-cols-[1fr_auto_1fr_2fr] items-center gap-2 rounded border border-violet-100 bg-white p-2 text-[11px]">
-                              <span>{edge.source}</span><span>→</span><span>{edge.target}</span>
-                              <input value={edge.label || ''} onChange={(event) => setEditedFlowEdges((edges) => edges.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} className="rounded border border-violet-100 px-2 py-1" aria-label={`Flow connection ${index + 1} label`} />
-                            </div>
-                          ))}
-                        </div>
-                        {artifact && <button onClick={handleSaveFlow} className="rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white">Save edited flow version</button>}
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center gap-3">
+                        {renderListPayload((artifact?.payload.nodes as any[])?.map((node: any) => node.label || node.id))}
                       </div>
-                    )}
-                    {kind === 'architecture' && (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {(artifact?.payload.layers as any[] || []).map((layer: any, index: number) => (
-                          <div key={layer.name || index} className="rounded-lg border border-cyan-100 bg-white p-4">
-                            <p className="text-sm font-bold text-cyan-700">{layer.name}</p>
-                            <ul className="mt-3 list-disc pl-5 text-xs text-ink-soft space-y-1">{renderListPayload(layer.components)}</ul>
+                        {editedFlowNodes.map((node: any, index: number) => (
+                          <div key={node.id || index} className="rounded-lg border border-violet-100 bg-white p-3">
+                            <input value={node.label || ''} onChange={(event) => setEditedFlowNodes((nodes) => nodes.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} className="w-full rounded border border-violet-100 px-2 py-1 text-xs font-bold text-violet-700" aria-label={`Flow node ${index + 1} label`} />
+                            <textarea value={node.description || ''} onChange={(event) => setEditedFlowNodes((nodes) => nodes.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} className="mt-2 w-full rounded border border-violet-100 px-2 py-1 text-[11px] text-ink-faint" aria-label={`Flow node ${index + 1} description`} />
                           </div>
                         ))}
                       </div>
-                    )}
-                    {!artifact && <p className="text-center text-sm text-ink-soft py-24">No {meta.label.toLowerCase()} generated yet. Use Regenerate to create the first version.</p>}
+                      <div className="space-y-2">
+                        {editedFlowEdges.map((edge: any, index: number) => (
+                          <div key={`${edge.source}-${edge.target}-${index}`} className="grid grid-cols-[1fr_auto_1fr_2fr] items-center gap-2 rounded border border-violet-100 bg-white p-2 text-[11px]">
+                            <span>{edge.source}</span><span>→</span><span>{edge.target}</span>
+                            <input value={edge.label || ''} onChange={(event) => setEditedFlowEdges((edges) => edges.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} className="rounded border border-violet-100 px-2 py-1" aria-label={`Flow connection ${index + 1} label`} />
+                          </div>
+                        ))}
+                      </div>
+                      {artifact && <button onClick={handleSaveFlow} className="rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white">Save edited flow version</button>}
+                    </div>
                   </div>
                   <div className="space-y-3">
                     <div className="rounded-lg border border-border bg-surface-alt p-4">
@@ -368,15 +356,36 @@ export default function BRDStudio() {
                         <button className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-700">Reject</button>
                       </div>
                     </div>
-                    <div className="rounded-lg border border-border bg-surface-alt p-4">
-                      <p className="text-xs font-bold text-ink">Payload Preview</p>
-                      <pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 text-[10px] text-slate-100">{JSON.stringify(artifact?.payload || {}, null, 2)}</pre>
-                    </div>
                   </div>
                 </div>
               </>
             );
           })()}
+        </section>
+      )}
+
+      {workspace === 'architecture' && (
+        <section className="rounded-xl border border-border bg-surface overflow-hidden">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-border px-5 py-4">
+            <div>
+              <h2 className="text-sm font-bold text-ink flex items-center gap-2"><Layers3 size={16} className="text-cyan-600" /> Solution Architecture Engine</h2>
+              <p className="text-xs text-ink-soft mt-1">Professional enterprise architecture visualization derived from your requirements.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => handleGenerate('architecture')} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-700">
+                <RefreshCw size={14} /> Regenerate
+              </button>
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs font-semibold text-ink-soft">
+                <History size={14} /> v{latestArtifacts.architecture?.version || 0}
+              </span>
+            </div>
+          </div>
+          <div className="p-6">
+            <ArchitectureWorkspace
+              artifact={latestArtifacts.architecture}
+              onExport={(format) => handleExportArtifact('architecture', format)}
+            />
+          </div>
         </section>
       )}
 
