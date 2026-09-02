@@ -228,6 +228,38 @@ export async function apiRagQuery(payload: unknown, token: string) {
   return request<any>('/ai/rag/query', { method: 'POST', body: JSON.stringify(payload) }, token);
 }
 
+export type ChatApiMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+};
+
+export type ChatApiState = {
+  active_account?: string | null;
+  active_project?: string | null;
+  active_employee?: string | null;
+  active_task?: string | null;
+  active_date_range?: string | null;
+  last_intent?: string | null;
+  last_entities?: Record<string, unknown>;
+};
+
+export async function apiChat(payload: {
+  message: string;
+  conversation_id?: string | null;
+  messages?: ChatApiMessage[];
+  state?: ChatApiState;
+}, token: string) {
+  return request<{
+    answer: string;
+    conversation_id: string;
+    provider: string;
+    model: string | null;
+    retrieval_mode: string;
+    state: ChatApiState;
+    sources: unknown[];
+  }>('/chat', { method: 'POST', body: JSON.stringify(payload) }, token);
+}
+
 export async function apiCreateAccount(payload: unknown, token: string) {
   return request<any>('/governance/accounts', { method: 'POST', body: JSON.stringify(payload) }, token);
 }

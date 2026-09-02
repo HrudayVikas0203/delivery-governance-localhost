@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
+import GlobalChatbot from '../components/GlobalChatbot';
 import Sidebar from '../components/Sidebar';
 import Topbar from '../components/Topbar';
 import { useStore } from '../store/useStore';
@@ -144,6 +145,7 @@ export default function MainLayout() {
           <Outlet />
         </main>
       </div>
+      <GlobalChatbot />
     </div>
   );
 }

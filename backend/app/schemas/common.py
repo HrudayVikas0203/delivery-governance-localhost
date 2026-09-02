@@ -406,6 +406,39 @@ class RagQueryOut(BaseModel):
     sources: list[dict]
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class ChatState(BaseModel):
+    active_account: str | None = None
+    active_project: str | None = None
+    active_employee: str | None = None
+    active_task: str | None = None
+    active_date_range: str | None = None
+    last_intent: str | None = None
+    last_entities: dict = {}
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = None
+    messages: list[ChatMessage] = []
+    state: ChatState = Field(default_factory=ChatState)
+    top_k: int = Field(default=5, ge=1, le=12)
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    conversation_id: str
+    provider: str = "groq"
+    model: str | None = None
+    retrieval_mode: str
+    state: ChatState
+    sources: list[dict] = []
+
+
 class ReportCreate(BaseModel):
     title: str
     report_type: ReportType

@@ -20,6 +20,11 @@ test('API base normalization never duplicates api/v1', () => {
   assert.equal(buildApiUrl(base, '/reports'), 'https://api.example/api/v1/reports');
 });
 
+test('chatbot endpoint uses the shared API base builder', () => {
+  const base = resolveApiBaseUrl('https://api.example/api/v1/', false);
+  assert.equal(buildApiUrl(base, '/chat'), 'https://api.example/api/v1/chat');
+});
+
 test('development defaults to the local backend only in development', () => {
   assert.equal(resolveApiBaseUrl(undefined, true), 'http://127.0.0.1:8000');
 });

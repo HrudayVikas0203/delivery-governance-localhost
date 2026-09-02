@@ -1,6 +1,8 @@
 ﻿from dataclasses import dataclass
 import logging
 
+import re
+
 import httpx
 from fastapi import HTTPException, status
 
@@ -19,6 +21,14 @@ GROQ_MODEL_ALLOWLIST = {
     "meta-llama/llama-4-scout-17b-16e-instruct",
 }
 
+GROQ_MODEL_PREFERENCE = [
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+]
+
 
 def validate_model_for_provider(provider_name: str, model_name: str | None) -> str:
     if not model_name:
@@ -32,6 +42,39 @@ def validate_model_for_provider(provider_name: str, model_name: str | None) -> s
         logger.warning("Unexpected Groq model %s is not in the supported allowlist; using default model instead.", normalized)
         return get_settings().groq_default_model
     return normalized
+
+
+def resolve_available_groq_model(preferred_model: str | None = None) -> str:
+    settings = get_settings()
+    configured = validate_model_for_provider("groq", preferred_model or settings.groq_default_model)
+    if not settings.groq_api_key:
+        return configured
+
+    try:
+        from groq import Groq
+
+        client = Groq(api_key=settings.groq_api_key, http_client=httpx.Client(timeout=10.0, trust_env=False), max_retries=1)
+        response = client.models.list()
+        available = {item.id for item in getattr(response, "data", []) if getattr(item, "id", None)}
+    except Exception:
+        logger.warning("Unable to validate Groq model availability; using configured model %s.", configured, exc_info=True)
+        return configured
+
+    if configured in available:
+        return configured
+
+    for candidate in GROQ_MODEL_PREFERENCE:
+        if candidate in available:
+            logger.warning("Groq model %s is unavailable; selected available model %s.", configured, candidate)
+            return candidate
+
+    production = sorted(model for model in available if "preview" not in model.lower() and "decommission" not in model.lower())
+    if production:
+        logger.warning("Groq model %s is unavailable; selected available model %s.", configured, production[0])
+        return production[0]
+
+    logger.warning("Groq model %s is unavailable and no replacement was found; attempting configured model.", configured)
+    return configured
 
 
 @dataclass(frozen=True)
@@ -76,10 +119,18 @@ def _messages(prompt: str) -> list[dict[str, str]]:
     ]
 
 
+def _strip_hidden_reasoning(text: str) -> str:
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+
+
 def generate_text(provider_name: str, prompt: str, model: str | None = None) -> tuple[str, str]:
     settings = get_settings()
     provider = require_provider(provider_name)
-    model_name = validate_model_for_provider(provider.name, model or provider.default_model)
+    model_name = (
+        resolve_available_groq_model(model or provider.default_model)
+        if provider.name == "groq"
+        else validate_model_for_provider(provider.name, model or provider.default_model)
+    )
 
     try:
         if provider.name == "groq":
@@ -87,7 +138,7 @@ def generate_text(provider_name: str, prompt: str, model: str | None = None) -> 
 
             client = Groq(api_key=settings.groq_api_key, http_client=httpx.Client(timeout=25.0, trust_env=False), max_retries=2)
             response = client.chat.completions.create(model=model_name, messages=_messages(prompt), temperature=0.2, max_tokens=1200)
-            return response.choices[0].message.content or "", model_name
+            return _strip_hidden_reasoning(response.choices[0].message.content or ""), model_name
         if provider.name == "gemini":
             from google import genai
             from google.genai import types
@@ -97,7 +148,7 @@ def generate_text(provider_name: str, prompt: str, model: str | None = None) -> 
                 http_options=types.HttpOptions(timeout=25_000),
             )
             response = client.models.generate_content(model=model_name, contents=prompt)
-            return extract_gemini_text(response), model_name
+            return _strip_hidden_reasoning(extract_gemini_text(response)), model_name
     except HTTPException:
         raise
     except Exception as exc:
