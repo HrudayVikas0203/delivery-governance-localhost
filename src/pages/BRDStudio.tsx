@@ -17,7 +17,6 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import {
-  apiCreateBRDArtifact,
   apiExportBRDArtifact,
   apiGenerateBRDAsset,
   apiListBRDArtifacts,
@@ -27,6 +26,7 @@ import {
   apiUploadBRDDocument,
 } from '../services/api';
 import ArchitectureWorkspace from '../components/ArchitectureWorkspace';
+import BusinessFlowWorkspace from '../components/BusinessFlowWorkspace';
 import type { BRDArtifact, BRDDocument, BRDRequirementSet } from '../types';
 
 type ArtifactKind = BRDArtifact['artifact_type'];
@@ -55,15 +55,6 @@ function downloadBlob(filename: string, blob: Blob) {
   URL.revokeObjectURL(link.href);
 }
 
-function renderListPayload(value: unknown) {
-  if (Array.isArray(value)) {
-    return value.map((item, index) => (
-      <li key={index}>{typeof item === 'string' ? item : JSON.stringify(item)}</li>
-    ));
-  }
-  return <li>{value ? String(value) : 'No data generated yet.'}</li>;
-}
-
 export default function BRDStudio() {
   const { authToken, projects } = useStore();
   const [projectId, setProjectId] = useState('');
@@ -74,8 +65,6 @@ export default function BRDStudio() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [overview, setOverview] = useState('');
   const [functionalText, setFunctionalText] = useState('');
-  const [editedFlowNodes, setEditedFlowNodes] = useState<any[]>([]);
-  const [editedFlowEdges, setEditedFlowEdges] = useState<any[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
 
   const activeProject = projects.find((project) => project.id === projectId);
@@ -114,12 +103,6 @@ export default function BRDStudio() {
 
   const latestRequirements = requirements[0];
 
-  useEffect(() => {
-    const flow = latestArtifacts.business_flow?.payload;
-    setEditedFlowNodes(Array.isArray(flow?.nodes) ? flow.nodes as any[] : []);
-    setEditedFlowEdges(Array.isArray(flow?.edges) ? flow.edges as any[] : []);
-  }, [latestArtifacts.business_flow]);
-
   const handleUpload = async (event: FormEvent) => {
     event.preventDefault();
     if (!authToken || !selectedFile || !projectId) return;
@@ -150,21 +133,6 @@ export default function BRDStudio() {
     setOverview('');
     setFunctionalText('');
     setFeedback('Requirements version saved.');
-  };
-
-  const handleSaveFlow = async () => {
-    if (!authToken || !projectId) return;
-    const created = await apiCreateBRDArtifact({
-      project_id: projectId,
-      document_id: latestDocument?.id || null,
-      artifact_type: 'business_flow',
-      title: `Business Flow Draft v${artifactCounts.business_flow + 1}`,
-      payload: { nodes: editedFlowNodes, edges: editedFlowEdges },
-      ai_provider: latestArtifacts.business_flow?.ai_provider || 'user-edited',
-      model_used: latestArtifacts.business_flow?.model_used || null,
-    }, authToken);
-    setArtifacts((current) => [created, ...current]);
-    setFeedback('Editable business flow version saved.');
   };
 
   const handleGenerate = async (kind: ArtifactKind | 'requirements') => {
@@ -297,70 +265,23 @@ export default function BRDStudio() {
 
       {workspace === 'business_flow' && (
         <section className="rounded-xl border border-border bg-surface overflow-hidden">
-          {(() => {
-            const kind = 'business_flow' as const;
-            const meta = artifactMeta[kind];
-            const Icon = meta.icon;
-            const artifact = latestArtifacts[kind];
-            return (
-              <>
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-border px-5 py-4">
-                  <div>
-                    <h2 className="text-sm font-bold text-ink flex items-center gap-2"><Icon size={16} className="text-violet-600" /> {meta.label} Engine</h2>
-                    <p className="text-xs text-ink-soft mt-1">AI-generated, versioned {meta.label.toLowerCase()} output derived from saved requirements.</p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button onClick={() => handleGenerate(kind)} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-700">
-                      <RefreshCw size={14} /> Regenerate
-                    </button>
-                    {(['pdf', 'docx', 'png', 'drawio'] as const).map((format) => (
-                      <button key={format} onClick={() => handleExportArtifact(kind, format)} disabled={!artifact} className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-ink-soft disabled:opacity-40 hover:bg-surface-alt">
-                        <Download size={14} /> {format === 'drawio' ? 'draw.io' : format.toUpperCase()}
-                      </button>
-                    ))}
-                    <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs font-semibold text-ink-soft">
-                      <History size={14} /> v{artifact?.version || 0}
-                    </span>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-5 p-5">
-                  <div className="rounded-lg border border-border bg-surface-alt p-5 min-h-[360px]">
-                    <div className="space-y-4">
-                      <div className="flex flex-wrap items-center gap-3">
-                        {renderListPayload((artifact?.payload.nodes as any[])?.map((node: any) => node.label || node.id))}
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {editedFlowNodes.map((node: any, index: number) => (
-                          <div key={node.id || index} className="rounded-lg border border-violet-100 bg-white p-3">
-                            <input value={node.label || ''} onChange={(event) => setEditedFlowNodes((nodes) => nodes.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} className="w-full rounded border border-violet-100 px-2 py-1 text-xs font-bold text-violet-700" aria-label={`Flow node ${index + 1} label`} />
-                            <textarea value={node.description || ''} onChange={(event) => setEditedFlowNodes((nodes) => nodes.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} className="mt-2 w-full rounded border border-violet-100 px-2 py-1 text-[11px] text-ink-faint" aria-label={`Flow node ${index + 1} description`} />
-                          </div>
-                        ))}
-                      </div>
-                      <div className="space-y-2">
-                        {editedFlowEdges.map((edge: any, index: number) => (
-                          <div key={`${edge.source}-${edge.target}-${index}`} className="grid grid-cols-[1fr_auto_1fr_2fr] items-center gap-2 rounded border border-violet-100 bg-white p-2 text-[11px]">
-                            <span>{edge.source}</span><span>→</span><span>{edge.target}</span>
-                            <input value={edge.label || ''} onChange={(event) => setEditedFlowEdges((edges) => edges.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} className="rounded border border-violet-100 px-2 py-1" aria-label={`Flow connection ${index + 1} label`} />
-                          </div>
-                        ))}
-                      </div>
-                      {artifact && <button onClick={handleSaveFlow} className="rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white">Save edited flow version</button>}
-                    </div>
-                  </div>
-                  <div className="space-y-3">
-                    <div className="rounded-lg border border-border bg-surface-alt p-4">
-                      <p className="text-xs font-bold text-ink">Governance Review</p>
-                      <div className="mt-3 flex gap-2">
-                        <button className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">Approve</button>
-                        <button className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-700">Reject</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </>
-            );
-          })()}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-border px-5 py-4">
+            <div>
+              <h2 className="text-sm font-bold text-ink flex items-center gap-2"><GitBranch size={16} className="text-violet-600" /> Business Flow Engine</h2>
+              <p className="text-xs text-ink-soft mt-1">Professional visual process representation derived from your requirements.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => handleGenerate('business_flow')} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-700">
+                <RefreshCw size={14} /> Regenerate
+              </button>
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs font-semibold text-ink-soft">
+                <History size={14} /> v{latestArtifacts.business_flow?.version || 0}
+              </span>
+            </div>
+          </div>
+          <div className="p-6">
+            <BusinessFlowWorkspace artifact={latestArtifacts.business_flow} />
+          </div>
         </section>
       )}
 
@@ -392,13 +313,30 @@ export default function BRDStudio() {
       {workspace === 'export' && (
         <section className="rounded-xl border border-border bg-surface p-5">
           <h2 className="text-sm font-bold text-ink flex items-center gap-2"><Download size={16} className="text-orange-600" /> Export Center</h2>
-          <p className="text-xs text-ink-soft mt-1">Download the actual generated architecture or flow in professional document, image, or editable draw.io formats.</p>
+          <p className="text-xs text-ink-soft mt-1">Download your generated artifacts in professional formats.</p>
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
             {(['business_flow', 'architecture'] as ArtifactKind[]).map((kind) => (
               <div key={kind} className="rounded-lg border border-border p-4">
                 <p className="text-sm font-semibold text-ink">{artifactMeta[kind].label}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {(['pdf', 'docx', 'png', 'drawio'] as const).map((format) => <button key={format} onClick={() => handleExportArtifact(kind, format)} disabled={!latestArtifacts[kind]} className="rounded border border-border px-3 py-2 text-xs font-semibold disabled:opacity-40">{format === 'drawio' ? 'draw.io' : format.toUpperCase()}</button>)}
+                <div className="mt-3 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    {(['png', 'pdf', 'docx', 'drawio'] as const).map((format) => (
+                      <button
+                        key={format}
+                        onClick={() => handleExportArtifact(kind, format)}
+                        disabled={!latestArtifacts[kind]}
+                        className="rounded border border-border px-3 py-2 text-xs font-semibold disabled:opacity-40 hover:bg-surface-alt transition"
+                        title={`Export ${kind} as ${format.toUpperCase()}`}
+                      >
+                        {format === 'drawio' ? '✎ draw.io' : format === 'png' ? '📸 PNG' : format === 'pdf' ? '📄 PDF' : '📝 DOCX'}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-2 p-2 rounded bg-slate-50 border border-slate-200">
+                    <p className="text-[10px] text-slate-600">
+                      <span className="font-semibold">Visio:</span> Coming soon
+                    </p>
+                  </div>
                 </div>
               </div>
             ))}
