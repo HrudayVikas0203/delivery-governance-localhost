@@ -1,0 +1,13 @@
+[run]
+branch = True
+source = app
+omit =
+    */tests/*
+    */__pycache__/*
+    */coverage/*
+    */storage/*
+
+[report]
+skip_empty = True
+show_missing = True
+
