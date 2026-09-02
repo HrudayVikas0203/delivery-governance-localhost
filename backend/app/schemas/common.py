@@ -481,3 +481,37 @@ class ReportOut(ORMModel):
     generated_at: datetime
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+# Chatbot conversation schemas
+class ChatMessageIn(BaseModel):
+    """User message in a conversation."""
+    message: str = Field(min_length=1, max_length=2000)
+    conversation_id: str | None = None
+    project_id: str | None = None
+
+
+class ChatMessageOut(BaseModel):
+    """AI assistant response."""
+    conversation_id: str
+    message: str
+    context_type: str  # "database", "rag", "hybrid"
+    provider: str
+    model: str
+    sources: list[dict] = []
+    entities_used: list[dict] = []
+    timestamp: datetime
+
+
+class ChatSourceOut(BaseModel):
+    """Reference to a source document."""
+    document: str
+    metadata: dict
+    distance: float | None = None
+
+
+class ChatHistoryOut(BaseModel):
+    """Conversation history entry."""
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: datetime | None = None

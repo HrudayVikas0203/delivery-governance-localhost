@@ -397,3 +397,12 @@ export async function apiRefreshCoverage(token: string) {
 export async function apiDownloadCoverageReport(reportType: 'html' | 'lcov', token: string) {
   return requestBlob(`/code-quality/coverage/report/${reportType}`, token);
 }
+
+export async function apiChatMessage(message: string, conversationId: string | null, projectId: string | null, token: string) {
+  const payload = {
+    message,
+    conversation_id: conversationId,
+    project_id: projectId,
+  };
+  return request<any>('/ai/chat', { method: 'POST', body: JSON.stringify(payload) }, token);
+}

@@ -6,6 +6,7 @@ import Login from './pages/Login';
 import MainLayout from './layouts/MainLayout';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Chatbot = lazy(() => import('./pages/Chatbot'));
 const Accounts = lazy(() => import('./pages/Accounts'));
 const Projects = lazy(() => import('./pages/Projects'));
 const EmployeeDirectory = lazy(() => import('./pages/EmployeeDirectory'));
@@ -53,6 +54,7 @@ function App() {
           element={isAuthenticated ? <MainLayout /> : <Navigate to="/login" replace />}
         >
           <Route path="/dashboard" element={<Suspense fallback={<PageLoader />}><Dashboard /></Suspense>} />
+          <Route path="/chatbot" element={<Suspense fallback={<PageLoader />}><Chatbot /></Suspense>} />
           <Route path="/code-coverage" element={<Suspense fallback={<PageLoader />}><CodeCoverage /></Suspense>} />
           <Route path="/accounts" element={<Suspense fallback={<PageLoader />}><Accounts /></Suspense>} />
           <Route path="/projects" element={<Suspense fallback={<PageLoader />}><Projects /></Suspense>} />

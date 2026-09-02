@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Activity, Grid, Building, Calendar, CheckCircle, Bell, User, Settings, HelpCircle, Users, Cpu, FileText, Shield, FolderKanban, ClipboardList, ChartColumn } from 'lucide-react';
+import { Activity, Grid, Building, Calendar, CheckCircle, Bell, User, Settings, HelpCircle, Users, Cpu, FileText, Shield, FolderKanban, ClipboardList, ChartColumn, MessageCircle } from 'lucide-react';
 import { useStore } from '../store/useStore';
 
 export default function Sidebar({ collapsed }: { collapsed: boolean }) {
@@ -11,6 +11,7 @@ export default function Sidebar({ collapsed }: { collapsed: boolean }) {
 
   const navItems = [
     { path: '/dashboard', label: 'Dashboard', icon: Grid, show: true },
+    { path: '/chatbot', label: 'AI Chatbot', icon: MessageCircle, show: true },
     { path: '/code-coverage', label: 'Code Coverage', icon: ChartColumn, show: true },
     { path: '/accounts', label: 'Accounts', icon: Building, show: true },
     { path: '/projects', label: 'Projects', icon: FolderKanban, show: true },

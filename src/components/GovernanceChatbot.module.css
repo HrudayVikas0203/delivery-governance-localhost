@@ -1,0 +1,311 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #e0e0e0;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.headerActions {
+  display: flex;
+  gap: 8px;
+}
+
+.clearButton,
+.closeButton {
+  background: none;
+  border: none;
+  color: white;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+
+.clearButton:hover,
+.closeButton:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.messagesContainer {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #666;
+  text-align: center;
+}
+
+.emptyState p {
+  margin: 8px 0;
+  font-size: 14px;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+  width: 100%;
+  max-width: 300px;
+}
+
+.suggestionButton {
+  padding: 10px 16px;
+  background: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #333;
+  transition: all 0.2s;
+}
+
+.suggestionButton:hover {
+  background: #e8e8e8;
+  border-color: #667eea;
+  color: #667eea;
+}
+
+.messageWrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.message {
+  padding: 12px 16px;
+  border-radius: 8px;
+  max-width: 80%;
+  word-wrap: break-word;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: #667eea;
+  color: white;
+}
+
+.message.assistant {
+  align-self: flex-start;
+  background: #f0f0f0;
+  color: #333;
+}
+
+.messageContent {
+  white-space: pre-wrap;
+}
+
+.metadata {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.contextType {
+  font-size: 11px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.message.user .contextType {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.sourcesButton {
+  background: none;
+  border: none;
+  color: #667eea;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+
+.sourcesButton:hover {
+  color: #764ba2;
+}
+
+.sourcesPanel {
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 8px;
+  margin-left: 0;
+  max-width: 100%;
+  font-size: 12px;
+}
+
+.sourcesPanel h4 {
+  margin: 0 0 8px 0;
+  color: #333;
+}
+
+.sourceItem {
+  padding: 8px;
+  background: #f9f9f9;
+  border-left: 3px solid #667eea;
+  margin-bottom: 8px;
+  border-radius: 4px;
+}
+
+.sourceItem p {
+  margin: 0 0 4px 0;
+  line-height: 1.4;
+  color: #555;
+}
+
+.sourceItem small {
+  color: #999;
+}
+
+.loadingSpinner {
+  display: flex;
+  gap: 4px;
+}
+
+.loadingSpinner span {
+  animation: pulse 1.4s infinite;
+  font-size: 12px;
+}
+
+.loadingSpinner span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.loadingSpinner span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes pulse {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+.errorAlert {
+  background: #fee;
+  border: 1px solid #fcc;
+  border-radius: 6px;
+  padding: 12px;
+  color: #c33;
+  font-size: 14px;
+}
+
+.errorAlert p {
+  margin: 0;
+}
+
+.inputForm {
+  display: flex;
+  gap: 8px;
+  padding: 16px;
+  border-top: 1px solid #e0e0e0;
+  background: white;
+}
+
+.input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: border-color 0.2s;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+}
+
+.input:disabled {
+  background: #f9f9f9;
+  color: #999;
+}
+
+.submitButton {
+  padding: 10px 16px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.submitButton:hover:not(:disabled) {
+  background: #764ba2;
+}
+
+.submitButton:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+/* Responsive adjustments */
+@media (max-width: 600px) {
+  .message {
+    max-width: 90%;
+  }
+
+  .messagesContainer {
+    padding: 12px;
+  }
+
+  .inputForm {
+    padding: 12px;
+    gap: 6px;
+  }
+
+  .header {
+    padding: 12px;
+  }
+
+  .header h2 {
+    font-size: 16px;
+  }
+}

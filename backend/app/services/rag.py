@@ -96,6 +96,15 @@ Context:
 Question:
 {payload.question}
 """
-    answer, model = generate_text("groq", prompt, llm.model)
+    try:
+        answer, model = generate_text("groq", prompt, llm.model)
+    except HTTPException as e:
+        if e.status_code == 400 and "API key" in e.detail:
+            # API key not configured - provide fallback response
+            answer = f"I found {len(rag_sources)} relevant documents about your question. Here's what they contain: {context_text[:500]}... The AI synthesis feature is not currently available, but the above context should help answer your question."
+            model = "fallback"
+        else:
+            raise
+    
     final_sources = rag_sources or sources
     return RagQueryOut(answer=answer, provider="groq", model=model, sources=final_sources)
