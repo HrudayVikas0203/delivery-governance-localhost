@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { apiCreateTask, apiListTasks, apiUpdateProject } from '../services/api';
-import type { DeliveryTask, Employee, TaskPriority } from '../types';
+import type { DeliveryTask, Employee, ResourceAllocation, TaskPriority } from '../types';
 
 type AllocationRoleKey = 'program' | 'projectManager' | 'architect' | 'developer' | 'qa' | 'devops' | 'intern';
 
@@ -272,7 +272,7 @@ export default function Projects() {
     try {
       const { apiCreateAllocation } = await import('../services/api');
       let allocatedCount = 0;
-      const newAllocations = [];
+      const newAllocations: ResourceAllocation[] = [];
       for (const { group, employeeId } of uniqueAssignments) {
         const emp = employees.find(e => e.id === employeeId);
         if (!emp) continue;

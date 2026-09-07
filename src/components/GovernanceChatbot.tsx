@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { apiChatMessage } from '../services/api';
+import { apiChat, type ChatApiState } from '../services/api';
 import { useStore } from '../store/useStore';
 import styles from './GovernanceChatbot.module.css';
 
@@ -30,6 +30,7 @@ export const GovernanceChatbot: React.FC<GovernanceChatbotProps> = ({
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [chatState, setChatState] = useState<ChatApiState>({});
   const [showSources, setShowSources] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -72,7 +73,15 @@ export const GovernanceChatbot: React.FC<GovernanceChatbotProps> = ({
 
     try {
       // Send to backend
-      const response = await apiChatMessage(inputValue, conversationId, projectId || null, authToken);
+      const response = await apiChat({
+        message: inputValue,
+        conversation_id: conversationId,
+        messages: [...messages, userMessage].map(({ role, content }) => ({ role, content })),
+        state: {
+          ...chatState,
+          active_project: projectId || chatState.active_project || null,
+        },
+      }, authToken);
 
       const data = response;
 
@@ -80,16 +89,18 @@ export const GovernanceChatbot: React.FC<GovernanceChatbotProps> = ({
       if (data.conversation_id && !conversationId) {
         setConversationId(data.conversation_id);
       }
+      setChatState(data.state || {});
 
       // Add assistant message
       const assistantMessage: ChatMessage = {
         id: `msg-${Date.now()}-ai`,
         role: 'assistant',
-        content: data.message,
-        timestamp: data.timestamp,
-        contextType: data.context_type,
-        sources: data.sources || [],
-        entitiesUsed: data.entities_used || [],
+        content: data.answer,
+        timestamp: new Date().toISOString(),
+        contextType: data.retrieval_mode,
+        sources: (data.sources || []).filter((source): source is NonNullable<ChatMessage['sources']>[number] => (
+          typeof source === 'object' && source !== null && 'document' in source
+        )),
       };
 
       setMessages(prev => [...prev, assistantMessage]);
@@ -116,6 +127,7 @@ export const GovernanceChatbot: React.FC<GovernanceChatbotProps> = ({
   const handleClearHistory = () => {
     setMessages([]);
     setConversationId(null);
+    setChatState({});
     setError(null);
   };
 

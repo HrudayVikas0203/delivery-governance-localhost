@@ -101,6 +101,7 @@ Rules implemented:
 - `POST /api/v1/governance/rag/reindex`
 - `GET /api/v1/ai/providers`
 - `POST /api/v1/ai/rag/query`
+- `POST /api/v1/chat` (canonical authenticated Groq chatbot endpoint)
 - `POST /api/v1/reports`
 - `GET /api/v1/reports`
 

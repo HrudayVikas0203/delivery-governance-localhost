@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import time
 
@@ -15,6 +16,8 @@ from app.db.session import Base, SessionLocal, engine
 from app.models.people import Employee
 from app.services.email import dispatch_due_scheduled_emails
 
+logger = logging.getLogger(__name__)
+CANONICAL_CHAT_PATH = "/api/v1/chat"
 
 def _startup_debug_enabled() -> bool:
     return os.getenv("DB_DEBUG", "").strip().lower() == "true"
@@ -95,6 +98,17 @@ def create_app() -> FastAPI:
         return {"status": "ok", "surface": "fastapi"}
 
     app.include_router(api_router, prefix=settings.api_prefix)
+    chat_routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == CANONICAL_CHAT_PATH
+        and "POST" in (getattr(route, "methods", set()) or set())
+    ]
+    if len(chat_routes) != 1:
+        raise RuntimeError(
+            f"Expected exactly one POST {CANONICAL_CHAT_PATH} route; found {len(chat_routes)}."
+        )
+    logger.info("Registered canonical chatbot route: POST %s", CANONICAL_CHAT_PATH)
     app.mount("/flask", WSGIMiddleware(create_flask_ops_app()))
     return app
 

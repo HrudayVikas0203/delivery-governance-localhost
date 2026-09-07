@@ -83,7 +83,7 @@ class Settings(BaseSettings):
 
     groq_api_key: str | None = None
     groq_default_model: str = Field(
-        default="qwen/qwen3.6-27b",
+        default="llama-3.3-70b-versatile",
         validation_alias=AliasChoices("GROQ_DEFAULT_MODEL", "groq_default_model"),
     )
     gemini_api_key: str | None = None

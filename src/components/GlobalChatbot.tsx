@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Bot, Loader2, MessageCircle, Minus, Send, X } from 'lucide-react';
-import { apiChat, type ChatApiMessage, type ChatApiState } from '../services/api';
+import { ApiError, apiChat, type ChatApiMessage, type ChatApiState } from '../services/api';
 import { useStore } from '../store/useStore';
 
 type ChatMessage = ChatApiMessage & {
@@ -18,10 +18,14 @@ const initialMessages: ChatMessage[] = [
 
 function friendlyChatError(error: unknown) {
   const message = error instanceof Error ? error.message : 'The assistant is unavailable right now.';
-  if (message.includes('401') || message.toLowerCase().includes('invalid token')) return 'Your session has expired. Please sign in again.';
-  if (message.includes('403') || message.toLowerCase().includes('permission')) return 'You do not have access to that information.';
-  if (message.includes('404')) return 'The chatbot endpoint is not available on this backend.';
-  if (message.includes('422')) return 'I could not understand that request. Try rephrasing it.';
+  const status = error instanceof ApiError ? error.status : null;
+  if (status === 401 || message.toLowerCase().includes('invalid token')) return 'Your session has expired. Please sign in again.';
+  if (status === 403 || message.toLowerCase().includes('permission')) return 'You do not have access to that information.';
+  if (status === 404) return 'The chatbot endpoint is not available on this backend.';
+  if (status === 422) return 'I could not understand that request. Try rephrasing it.';
+  if (status === 502) return 'Groq or semantic search is temporarily unavailable. Please try again shortly.';
+  if (status === 503) return 'The governance database is temporarily unavailable. Please try again shortly.';
+  if (status && status >= 500) return 'The assistant hit a server problem. Please try again.';
   if (message.includes('Unable to reach')) return message;
   return message || 'The assistant hit a problem. Please try again.';
 }
@@ -71,10 +75,11 @@ export default function GlobalChatbot() {
         { id: crypto.randomUUID(), role: 'assistant', content: response.answer || 'I could not find an answer for that.' },
       ]);
     } catch (err) {
-      setError(friendlyChatError(err));
+      const friendlyError = friendlyChatError(err);
+      setError(friendlyError);
       setMessages((current) => [
         ...current,
-        { id: crypto.randomUUID(), role: 'assistant', content: 'I could not complete that request.' },
+        { id: crypto.randomUUID(), role: 'assistant', content: friendlyError },
       ]);
     } finally {
       setIsSending(false);

@@ -2,6 +2,16 @@ import { buildApiUrl, isRetryableMethod, resolveApiBaseUrl, shouldClearAuthentic
 
 const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL, import.meta.env.DEV);
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 function buildUrl(path: string) {
   return buildApiUrl(API_BASE_URL, path);
 }
@@ -83,7 +93,7 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
 
   if (!response.ok) {
     if (shouldClearAuthentication(response.status)) notifyUnauthorized();
-    throw new Error(await errorDetail(response));
+    throw new ApiError(response.status, await errorDetail(response));
   }
 
   if (response.status === 204) {
@@ -102,7 +112,7 @@ async function requestBlob(path: string, token?: string): Promise<Blob> {
   const response = await fetchWithRetry(url, { method: 'GET', headers: buildHeaders(token) });
   if (!response.ok) {
     if (shouldClearAuthentication(response.status)) notifyUnauthorized();
-    throw new Error(await errorDetail(response));
+    throw new ApiError(response.status, await errorDetail(response));
   }
   return response.blob();
 }
@@ -396,13 +406,4 @@ export async function apiRefreshCoverage(token: string) {
 
 export async function apiDownloadCoverageReport(reportType: 'html' | 'lcov', token: string) {
   return requestBlob(`/code-quality/coverage/report/${reportType}`, token);
-}
-
-export async function apiChatMessage(message: string, conversationId: string | null, projectId: string | null, token: string) {
-  const payload = {
-    message,
-    conversation_id: conversationId,
-    project_id: projectId,
-  };
-  return request<any>('/ai/chat', { method: 'POST', body: JSON.stringify(payload) }, token);
 }

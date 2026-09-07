@@ -1,10 +1,13 @@
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
+from types import SimpleNamespace
 
 from app.core.security import create_access_token
 from app.db.session import SessionLocal
 from app.main import app
 from app.models.people import Employee
 from app.services import chat as chat_service
+from app.services import llm as llm_service
 
 
 def _headers_for(email: str) -> dict[str, str]:
@@ -24,6 +27,17 @@ def test_chat_route_is_registered_in_openapi() -> None:
     response = client.get("/openapi.json")
     assert response.status_code == 200
     assert "/api/v1/chat" in response.json()["paths"]
+    assert "post" in response.json()["paths"]["/api/v1/chat"]
+    assert "/api/v1/ai/chat" not in response.json()["paths"]
+
+
+def test_chat_route_rejects_invalid_request() -> None:
+    response = TestClient(app).post(
+        "/api/v1/chat",
+        json={"message": ""},
+        headers=_headers_for("praveen.baburaya@delta.com"),
+    )
+    assert response.status_code == 422
 
 
 def test_chat_greeting_uses_groq_without_retrieval(monkeypatch) -> None:
@@ -159,7 +173,7 @@ def test_chat_reports_db_rag_when_question_needs_both(monkeypatch) -> None:
 def test_chat_db_failure_surfaces_error(monkeypatch) -> None:
     client = TestClient(app, raise_server_exceptions=False)
     def fail_context(*args, **kwargs):
-        raise RuntimeError("database down")
+        raise OperationalError("select 1", {}, RuntimeError("database down"))
 
     monkeypatch.setattr(chat_service, "_build_db_context", fail_context)
     response = client.post(
@@ -168,7 +182,57 @@ def test_chat_db_failure_surfaces_error(monkeypatch) -> None:
         headers=_headers_for("praveen.baburaya@delta.com"),
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 503
+    assert response.json()["detail"] == "The governance database is temporarily unavailable."
+
+
+def test_chat_groq_failure_is_distinct(monkeypatch) -> None:
+    def fail_groq(*args, **kwargs):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=502, detail="Groq generation failed.")
+
+    monkeypatch.setattr("app.services.llm.generate_text", fail_groq)
+    response = TestClient(app).post(
+        "/api/v1/chat",
+        json={"message": "Hi"},
+        headers=_headers_for("praveen.baburaya@delta.com"),
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Groq generation failed."
+
+
+def test_chat_rag_failure_is_distinct(monkeypatch) -> None:
+    monkeypatch.setattr(chat_service, "search_knowledge", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("vector store down")))
+    response = TestClient(app).post(
+        "/api/v1/chat",
+        json={"message": "What architecture approach was defined?"},
+        headers=_headers_for("praveen.baburaya@delta.com"),
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Semantic retrieval failed."
+
+
+def test_unavailable_configured_groq_model_selects_available_production_model(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        groq_api_key="configured-test-key",
+        groq_default_model="retired-model",
+        gemini_default_model="gemini-test",
+    )
+
+    class FakeGroq:
+        def __init__(self, **kwargs):
+            assert kwargs["api_key"] == "configured-test-key"
+            self.models = SimpleNamespace(
+                list=lambda: SimpleNamespace(
+                    data=[SimpleNamespace(id="llama-3.1-8b-instant")]
+                )
+            )
+
+    monkeypatch.setattr(llm_service, "get_settings", lambda: settings)
+    monkeypatch.setattr("groq.Groq", FakeGroq)
+
+    assert llm_service.resolve_available_groq_model() == "llama-3.1-8b-instant"
 
 
 def test_chat_uses_real_seeded_allocations_in_context(monkeypatch) -> None:
