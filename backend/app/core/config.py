@@ -3,13 +3,21 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILES = (
+    PROJECT_ROOT / ".env",
+    PROJECT_ROOT / ".env.local",
+    BACKEND_ROOT / ".env",
+    BACKEND_ROOT / ".env.local",
+)
+
+
 def resolve_app_path(value: str) -> Path:
     path = Path(value)
     if path.is_absolute():
@@ -21,8 +29,11 @@ def resolve_app_path(value: str) -> Path:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=("backend/.env", ".env"),
+        # Absolute paths make configuration independent of the directory from
+        # which uvicorn is launched. Backend-local files take precedence.
+        env_file=tuple(str(path) for path in ENV_FILES),
         env_file_encoding="utf-8",
+        env_ignore_empty=True,
         extra="ignore",
         case_sensitive=False,
         populate_by_name=True,
@@ -81,12 +92,20 @@ class Settings(BaseSettings):
     chroma_persist_directory: str = "backend/storage/chroma"
     chroma_collection: str = "delivery_governance_knowledge"
 
-    groq_api_key: str | None = None
+    groq_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GROQ_API_KEY", "groq_api_key"),
+        repr=False,
+    )
     groq_default_model: str = Field(
-        default="llama-3.3-70b-versatile",
+        default="openai/gpt-oss-120b",
         validation_alias=AliasChoices("GROQ_DEFAULT_MODEL", "groq_default_model"),
     )
-    gemini_api_key: str | None = None
+    gemini_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GEMINI_API_KEY", "gemini_api_key"),
+        repr=False,
+    )
     gemini_default_model: str = Field(
         default="gemini-3.5-flash",
         validation_alias=AliasChoices("GEMINI_MODEL", "gemini_default_model"),
@@ -104,6 +123,14 @@ class Settings(BaseSettings):
     smtp_user: str | None = None
     smtp_password: str | None = None
     from_email: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_FROM", "FROM_EMAIL", "from_email"))
+
+    @field_validator("groq_api_key", "gemini_api_key", mode="before")
+    @classmethod
+    def normalize_api_key(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
 
     @staticmethod
     def normalize_database_url(raw_url: str | None) -> str | None:

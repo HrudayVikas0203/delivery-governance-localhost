@@ -79,4 +79,5 @@ def mocked_report_gemini_mapping(monkeypatch):
 
     monkeypatch.setattr("app.reports.generator.map_template", fake_map_template)
     monkeypatch.setattr("app.services.llm.generate_text", fake_generate_text)
+    monkeypatch.setattr("app.services.rag.generate_text", fake_generate_text)
     monkeypatch.setattr("app.api.v1.brd.generate_text", fake_generate_text)

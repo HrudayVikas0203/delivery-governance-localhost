@@ -78,7 +78,7 @@ The Del Gov Delta platform now includes a production-quality governance AI chatb
   "message": "Here are the accounts...",
   "context_type": "database|rag|hybrid",
   "provider": "groq",
-  "model": "llama-3.3-70b-versatile",
+  "model": "openai/gpt-oss-120b",
   "sources": [
     {
       "document": "...",
@@ -98,11 +98,11 @@ The Del Gov Delta platform now includes a production-quality governance AI chatb
 ```bash
 # Groq LLM Configuration
 GROQ_API_KEY=your-groq-api-key
-GROQ_DEFAULT_MODEL=llama-3.3-70b-versatile
+GROQ_DEFAULT_MODEL=openai/gpt-oss-120b
 
 # Gemini Configuration (for other workflows)
 GEMINI_API_KEY=your-gemini-api-key
-GEMINI_MODEL=gemini-2.0-flash
+GEMINI_MODEL=gemini-2.5-flash
 
 # RAG/ChromaDB
 CHROMA_PERSIST_DIRECTORY=backend/storage/chroma

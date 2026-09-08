@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
+import pytest
 from sqlalchemy.exc import OperationalError
 from types import SimpleNamespace
 
@@ -213,26 +215,21 @@ def test_chat_rag_failure_is_distinct(monkeypatch) -> None:
     assert response.json()["detail"] == "Semantic retrieval failed."
 
 
-def test_unavailable_configured_groq_model_selects_available_production_model(monkeypatch) -> None:
+def test_unavailable_configured_groq_model_returns_configuration_error(monkeypatch) -> None:
     settings = SimpleNamespace(
         groq_api_key="configured-test-key",
         groq_default_model="retired-model",
         gemini_default_model="gemini-test",
     )
 
-    class FakeGroq:
-        def __init__(self, **kwargs):
-            assert kwargs["api_key"] == "configured-test-key"
-            self.models = SimpleNamespace(
-                list=lambda: SimpleNamespace(
-                    data=[SimpleNamespace(id="llama-3.1-8b-instant")]
-                )
-            )
-
     monkeypatch.setattr(llm_service, "get_settings", lambda: settings)
-    monkeypatch.setattr("groq.Groq", FakeGroq)
+    monkeypatch.setattr(llm_service, "_available_groq_models", lambda: frozenset({"openai/gpt-oss-120b"}))
 
-    assert llm_service.resolve_available_groq_model() == "llama-3.1-8b-instant"
+    with pytest.raises(HTTPException) as caught:
+        llm_service.resolve_available_groq_model()
+
+    assert caught.value.status_code == 503
+    assert caught.value.detail == llm_service.GROQ_MODEL_MESSAGE
 
 
 def test_chat_uses_real_seeded_allocations_in_context(monkeypatch) -> None:
