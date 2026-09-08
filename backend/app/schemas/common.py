@@ -1,14 +1,14 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from app.models.delivery import AccountStatus, AllocationRole, Health, ProjectPhase, RiskLevel
 from app.models.brd import BRDDocumentStatus
 from app.models.email import EmailStatus
 from app.models.people import Availability, Role
 from app.models.status import ReportFormat, ReportType, SubmissionStatus
-from app.models.tasks import TaskPriority, TaskStatus
+from app.models.tasks import TaskPriority, TaskStatus, TaskType
 
 
 class ORMModel(BaseModel):
@@ -182,15 +182,23 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=3, max_length=220)
     description: str | None = None
     assignee_id: str | None = None
-    assignee_ids: list[str] = []
+    assignee_ids: list[str] = Field(default_factory=list)
+    start_date: date | None = None
     due_date: date | None = None
+    task_type: TaskType = TaskType.OTHER
     priority: TaskPriority = TaskPriority.MEDIUM
     status: TaskStatus = TaskStatus.TODO
     estimate_hours: int = Field(default=0, ge=0)
-    labels: list[str] = []
-    tags: list[str] = []
-    checklist: list[dict | str] = []
+    labels: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    checklist: list[dict | str] = Field(default_factory=list)
     blocker_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_dates(self) -> "TaskCreate":
+        if self.start_date and self.due_date and self.due_date < self.start_date:
+            raise ValueError("Due date cannot be before start date")
+        return self
 
 
 class TaskUpdate(BaseModel):
@@ -198,7 +206,9 @@ class TaskUpdate(BaseModel):
     description: str | None = None
     assignee_id: str | None = None
     assignee_ids: list[str] | None = None
+    start_date: date | None = None
     due_date: date | None = None
+    task_type: TaskType | None = None
     priority: TaskPriority | None = None
     status: TaskStatus | None = None
     estimate_hours: int | None = Field(default=None, ge=0)
@@ -213,12 +223,15 @@ class TaskUpdate(BaseModel):
 class TaskOut(ORMModel):
     id: str
     project_id: str
+    account_id: str
     title: str
     description: str | None
+    task_type: TaskType
     status: TaskStatus
     priority: TaskPriority
     assignee_id: str | None
     reporter_id: str | None
+    start_date: date | None
     due_date: date | None
     estimate_hours: int
     actual_hours: int
@@ -233,7 +246,18 @@ class TaskOut(ORMModel):
     created_at: datetime
     updated_at: datetime
     project_name: str | None = None
+    account_name: str | None = None
     assignee_name: str | None = None
+    reporter_name: str | None = None
+
+
+class EligibleTaskAssigneeOut(BaseModel):
+    id: str
+    name: str
+    email: EmailStr
+    title: str
+    role: Role
+    allocation_role: AllocationRole
 
 
 class TaskCommentCreate(BaseModel):

@@ -298,10 +298,23 @@ export async function apiListAllocations(token: string) {
   return request<any[]>('/governance/allocations', { method: 'GET' }, token);
 }
 
-export async function apiListTasks(token: string, filters: { projectId?: string; assigneeId?: string } = {}) {
+export async function apiListTasks(token: string, filters: {
+  accountId?: string;
+  projectId?: string;
+  assigneeId?: string;
+  reporterId?: string;
+  status?: string;
+  priority?: string;
+  taskType?: string;
+} = {}) {
   const params = new URLSearchParams();
+  if (filters.accountId) params.set('account_id', filters.accountId);
   if (filters.projectId) params.set('project_id', filters.projectId);
   if (filters.assigneeId) params.set('assignee_id', filters.assigneeId);
+  if (filters.reporterId) params.set('reporter_id', filters.reporterId);
+  if (filters.status) params.set('task_status', filters.status);
+  if (filters.priority) params.set('priority', filters.priority);
+  if (filters.taskType) params.set('task_type', filters.taskType);
   const suffix = params.toString() ? `?${params.toString()}` : '';
   return request<any[]>(`/tasks${suffix}`, { method: 'GET' }, token);
 }
@@ -406,4 +419,19 @@ export async function apiRefreshCoverage(token: string) {
 
 export async function apiDownloadCoverageReport(reportType: 'html' | 'lcov', token: string) {
   return requestBlob(`/code-quality/coverage/report/${reportType}`, token);
+}
+
+export async function apiGetTask(taskId: string, token: string) {
+  return request<any>(`/tasks/${taskId}`, { method: 'GET' }, token);
+}
+
+export async function apiListEligibleTaskAssignees(projectId: string, token: string) {
+  return request<Array<{
+    id: string;
+    name: string;
+    email: string;
+    title: string;
+    role: string;
+    allocation_role: string;
+  }>>(`/tasks/projects/${projectId}/eligible-assignees`, { method: 'GET' }, token);
 }

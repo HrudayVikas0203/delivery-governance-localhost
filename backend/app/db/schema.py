@@ -5,6 +5,8 @@ from app.db.session import engine
 
 MYSQL_COLUMNS: dict[str, dict[str, str]] = {
     "tasks": {
+        "task_type": "VARCHAR(40) NOT NULL DEFAULT 'OTHER'",
+        "start_date": "DATE NULL",
         "tags": "JSON NULL",
         "checklist": "JSON NULL",
         "rejection_reason": "TEXT NULL",
@@ -45,6 +47,8 @@ MYSQL_COLUMNS: dict[str, dict[str, str]] = {
 
 SQLITE_COLUMNS: dict[str, dict[str, str]] = {
     "tasks": {
+        "task_type": "VARCHAR(40) NOT NULL DEFAULT 'OTHER'",
+        "start_date": "DATE NULL",
         "tags": "JSON NOT NULL DEFAULT '[]'",
         "checklist": "JSON NOT NULL DEFAULT '[]'",
         "rejection_reason": "TEXT NULL",

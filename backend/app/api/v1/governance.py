@@ -322,6 +322,8 @@ def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depend
     if "program_manager_id" in data and data["program_manager_id"] != (account.program_manager_id if account else None):
         raise HTTPException(status_code=422, detail="Project program manager must match the account manager")
     if "project_manager_id" in data and account:
+        if actor.role == Role.PROJECT_MANAGER:
+            raise HTTPException(status_code=403, detail="Project Managers cannot assign another Project Manager")
         validate_project_manager(db, account, data["project_manager_id"])
     if "tech_stack" in data and data["tech_stack"] is not None:
         data["tech_stack"] = ",".join(data["tech_stack"])

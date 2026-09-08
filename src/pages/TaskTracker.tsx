@@ -28,6 +28,7 @@ import {
   apiDeleteTask,
   apiEmailConfig,
   apiEmailTemplates,
+  apiListEligibleTaskAssignees,
   apiListScheduledEmails,
   apiListTaskComments,
   apiListTasks,
@@ -37,7 +38,7 @@ import {
   apiTaskApproval,
   apiUpdateTaskStatus,
 } from '../services/api';
-import type { DeliveryTask, TaskComment, TaskPriority, TaskStatus } from '../types';
+import type { DeliveryTask, TaskComment, TaskPriority, TaskStatus, TaskType } from '../types';
 
 type TaskView = 'dashboard' | 'table' | 'kanban' | 'emails' | 'reports';
 
@@ -56,6 +57,19 @@ const priorityClass: Record<TaskPriority, string> = {
   critical: 'bg-red-50 text-red-700',
 };
 
+const taskTypeOptions: Array<{ value: TaskType; label: string }> = [
+  { value: 'development', label: 'Development' },
+  { value: 'bug_fix', label: 'Bug Fix' },
+  { value: 'enhancement', label: 'Enhancement' },
+  { value: 'testing', label: 'Testing' },
+  { value: 'code_review', label: 'Code Review' },
+  { value: 'documentation', label: 'Documentation' },
+  { value: 'deployment', label: 'Deployment' },
+  { value: 'research', label: 'Research' },
+  { value: 'support', label: 'Support' },
+  { value: 'other', label: 'Other' },
+];
+
 const tabMeta: Array<{ key: TaskView; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'table', label: 'Task Directory', icon: Table2 },
@@ -70,13 +84,16 @@ function taskNumber(tasks: DeliveryTask[], taskId: string) {
 }
 
 export default function TaskTracker() {
-  const { authToken, currentUser, projects, employees, previewRole } = useStore();
+  const { authToken, currentUser, accounts, projects, employees, allocations, previewRole } = useStore();
   const [tasks, setTasks] = useState<DeliveryTask[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [view, setView] = useState<TaskView>('dashboard');
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all');
   const [priorityFilter, setPriorityFilter] = useState<TaskPriority | 'all'>('all');
   const [assigneeFilter, setAssigneeFilter] = useState('');
+  const [taskTypeFilter, setTaskTypeFilter] = useState<TaskType | 'all'>('all');
+  const [reporterFilter, setReporterFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortKey, setSortKey] = useState<'id' | 'title' | 'project_name' | 'assignee_name' | 'due_date' | 'priority' | 'status'>('due_date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
@@ -87,6 +104,7 @@ export default function TaskTracker() {
   const [comments, setComments] = useState<TaskComment[]>([]);
   const [commentBody, setCommentBody] = useState('');
   const [form, setForm] = useState({
+    accountId: '',
     title: '',
     description: '',
     projectId: '',
@@ -94,6 +112,8 @@ export default function TaskTracker() {
     extraAssigneeIds: [] as string[],
     priority: 'medium' as TaskPriority,
     status: 'todo' as TaskStatus,
+    taskType: 'development' as TaskType,
+    startDate: '',
     dueDate: '',
     estimateHours: 8,
     labels: 'Task',
@@ -108,18 +128,50 @@ export default function TaskTracker() {
   const [emailBody, setEmailBody] = useState('Please review the current project tasks, blockers, and review items before the governance sync.');
   const [emailDateTime, setEmailDateTime] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [eligibleAssignees, setEligibleAssignees] = useState<Array<{ id: string; name: string; title: string; allocation_role: string }>>([]);
+  const [loadingAssignees, setLoadingAssignees] = useState(false);
 
-  const canManage = previewRole === 'manager' || previewRole === 'project_director' || previewRole === 'studio_head';
+  const canManage = previewRole === 'manager' || previewRole === 'project_director' || previewRole === 'studio_head' || currentUser?.roleCategory === 'Architect';
   const pageSize = 10;
+  const selectedAccountProjects = useMemo(
+    () => selectedAccountId ? projects.filter((project) => project.accountId === selectedAccountId) : projects,
+    [projects, selectedAccountId],
+  );
+  const formProjects = useMemo(
+    () => form.accountId ? projects.filter((project) => project.accountId === form.accountId) : [],
+    [form.accountId, projects],
+  );
+  const taskAssigneeOptions = useMemo(() => {
+    const scopedProjectIds = new Set(
+      selectedProjectId
+        ? [selectedProjectId]
+        : selectedAccountId
+          ? projects.filter((project) => project.accountId === selectedAccountId).map((project) => project.id)
+          : projects.map((project) => project.id),
+    );
+    const ids = new Set(
+      allocations
+        .filter((allocation) => scopedProjectIds.has(allocation.projectId) && allocation.projectStatus === 'Active')
+        .map((allocation) => allocation.employeeId),
+    );
+    return employees.filter((employee) => ids.has(employee.id));
+  }, [allocations, employees, projects, selectedAccountId, selectedProjectId]);
+  const reporterOptions = useMemo(() => {
+    const ids = new Set(tasks.map((task) => task.reporter_id).filter(Boolean));
+    return employees.filter((employee) => ids.has(employee.id));
+  }, [employees, tasks]);
 
   useEffect(() => {
     async function loadTasks() {
       if (!authToken) return;
-      const loaded = await apiListTasks(authToken, selectedProjectId ? { projectId: selectedProjectId } : {});
+      const loaded = await apiListTasks(authToken, {
+        accountId: selectedAccountId || undefined,
+        projectId: selectedProjectId || undefined,
+      });
       setTasks(loaded);
     }
     loadTasks().catch((err) => setFeedback(err instanceof Error ? err.message : 'Unable to load tasks.'));
-  }, [authToken, selectedProjectId]);
+  }, [authToken, selectedAccountId, selectedProjectId]);
 
   useEffect(() => {
     async function loadEmailState() {
@@ -140,16 +192,47 @@ export default function TaskTracker() {
   }, [authToken, selectedTask]);
 
   useEffect(() => {
-    if (!form.projectId && projects.length > 0) {
-      setForm((current) => ({ ...current, projectId: selectedProjectId || projects[0].id }));
+    if (!form.accountId && accounts.length > 0) {
+      const project = projects.find((item) => item.id === selectedProjectId);
+      setForm((current) => ({ ...current, accountId: project?.accountId || selectedAccountId || accounts[0].id }));
     }
-  }, [form.projectId, projects, selectedProjectId]);
+  }, [accounts, form.accountId, projects, selectedAccountId, selectedProjectId]);
+
+  useEffect(() => {
+    if (!form.accountId) return;
+    const availableProjects = projects.filter((project) => project.accountId === form.accountId);
+    if (form.projectId && !availableProjects.some((project) => project.id === form.projectId)) {
+      setForm((current) => ({
+        ...current,
+        projectId: '',
+        assigneeId: '',
+        extraAssigneeIds: [],
+      }));
+    }
+  }, [form.accountId, form.projectId, projects]);
+
+  useEffect(() => {
+    if (!authToken || !form.projectId) {
+      setEligibleAssignees([]);
+      return;
+    }
+    setLoadingAssignees(true);
+    apiListEligibleTaskAssignees(form.projectId, authToken)
+      .then(setEligibleAssignees)
+      .catch((error) => {
+        setEligibleAssignees([]);
+        setFeedback(error instanceof Error ? error.message : 'Unable to load allocated developers.');
+      })
+      .finally(() => setLoadingAssignees(false));
+  }, [authToken, form.projectId]);
 
   const visibleTasks = useMemo(() => {
     let filtered = previewRole === 'employee' && currentUser ? tasks.filter((task) => task.assignee_id === currentUser.id || task.assignee_ids?.includes(currentUser.id)) : tasks;
     if (statusFilter !== 'all') filtered = filtered.filter((task) => task.status === statusFilter);
     if (priorityFilter !== 'all') filtered = filtered.filter((task) => task.priority === priorityFilter);
     if (assigneeFilter) filtered = filtered.filter((task) => task.assignee_id === assigneeFilter || task.assignee_ids?.includes(assigneeFilter));
+    if (taskTypeFilter !== 'all') filtered = filtered.filter((task) => task.task_type === taskTypeFilter);
+    if (reporterFilter) filtered = filtered.filter((task) => task.reporter_id === reporterFilter);
     if (searchQuery.trim()) {
       const needle = searchQuery.trim().toLowerCase();
       filtered = filtered.filter((task) =>
@@ -165,7 +248,7 @@ export default function TaskTracker() {
       const right = sortKey === 'id' ? taskNumber(tasks, b.id) : String((b as any)[sortKey] || '');
       return sortDirection === 'asc' ? left.localeCompare(right) : right.localeCompare(left);
     });
-  }, [assigneeFilter, currentUser, previewRole, priorityFilter, searchQuery, sortDirection, sortKey, statusFilter, tasks]);
+  }, [assigneeFilter, currentUser, previewRole, priorityFilter, reporterFilter, searchQuery, sortDirection, sortKey, statusFilter, taskTypeFilter, tasks]);
 
   const metrics = {
     open: visibleTasks.filter((task) => task.status !== 'done').length,
@@ -194,17 +277,26 @@ export default function TaskTracker() {
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
-    if (!authToken || !form.projectId) return;
+    if (!authToken || !form.projectId) {
+      setFeedback('Please select a project.');
+      return;
+    }
+    if (form.assigneeId && eligibleAssignees.length === 0) {
+      setFeedback('No developers are allocated to this project. Allocate a developer before creating an assigned task.');
+      return;
+    }
     try {
       const labels = form.labels.split(',').map((label) => label.trim()).filter(Boolean);
       const created = await apiCreateTask({
         project_id: form.projectId,
         title: form.title,
         description: form.description,
+        task_type: form.taskType,
         assignee_id: form.assigneeId || null,
         assignee_ids: [form.assigneeId, ...form.extraAssigneeIds].filter(Boolean),
         priority: form.priority,
         status: form.status,
+        start_date: form.startDate || null,
         due_date: form.dueDate || null,
         estimate_hours: Number(form.estimateHours) || 0,
         labels,
@@ -212,7 +304,7 @@ export default function TaskTracker() {
         checklist: [],
       }, authToken);
       setTasks((current) => [created, ...current]);
-      setForm((current) => ({ ...current, title: '', description: '', assigneeId: '', extraAssigneeIds: [], priority: 'medium', status: 'todo', dueDate: '', estimateHours: 8, labels: 'Task' }));
+      setForm((current) => ({ ...current, title: '', description: '', assigneeId: '', extraAssigneeIds: [], priority: 'medium', status: 'todo', taskType: 'development', startDate: '', dueDate: '', estimateHours: 8, labels: 'Task' }));
       setIsFormOpen(false);
       setFeedback('Task created.');
     } catch (error) {
@@ -222,8 +314,18 @@ export default function TaskTracker() {
 
   const handleStatusChange = async (task: DeliveryTask, nextStatus: TaskStatus) => {
     if (!authToken) return;
-    const updated = await apiUpdateTaskStatus(task.id, { status: nextStatus }, authToken);
-    refreshTask(updated);
+    const previousStatus = task.status;
+    setTasks((current) => current.map((item) => item.id === task.id ? { ...item, status: nextStatus } : item));
+    setSelectedTask((current) => current?.id === task.id ? { ...current, status: nextStatus } : current);
+    try {
+      const updated = await apiUpdateTaskStatus(task.id, { status: nextStatus }, authToken);
+      refreshTask(updated);
+    } catch (error) {
+      setTasks((current) => current.map((item) => item.id === task.id ? { ...item, status: previousStatus } : item));
+      setSelectedTask((current) => current?.id === task.id ? { ...current, status: previousStatus } : current);
+      setFeedback(error instanceof Error ? error.message : 'Unable to update task status. The change was reverted.');
+      throw error;
+    }
   };
 
   const handleDrop = async (targetStatus: TaskStatus) => {
@@ -233,6 +335,8 @@ export default function TaskTracker() {
     try {
       await handleStatusChange(task, targetStatus);
       setFeedback(`Moved "${task.title}" to ${statusColumns.find((status) => status.key === targetStatus)?.label}.`);
+    } catch {
+      // handleStatusChange restores the previous persisted state and reports the error.
     } finally {
       setDraggedTaskId(null);
     }
@@ -307,6 +411,8 @@ export default function TaskTracker() {
     setStatusFilter('all');
     setPriorityFilter('all');
     setAssigneeFilter('');
+    setTaskTypeFilter('all');
+    setReporterFilter('');
     setPage(1);
   };
 
@@ -321,9 +427,13 @@ export default function TaskTracker() {
           <p className="text-sm text-ink-soft mt-1">Project dashboard, task directory, kanban workflow, reviews, comments, reports, and scheduled email updates.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <select value={selectedAccountId} onChange={(event) => { setSelectedAccountId(event.target.value); setSelectedProjectId(''); setPage(1); }} className="bg-surface border border-border rounded-lg px-3 py-2 text-xs text-ink outline-none focus:border-blue-600">
+            <option value="">All accounts</option>
+            {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+          </select>
           <select value={selectedProjectId} onChange={(event) => { setSelectedProjectId(event.target.value); setPage(1); }} className="bg-surface border border-border rounded-lg px-3 py-2 text-xs text-ink outline-none focus:border-blue-600">
             <option value="">All projects</option>
-            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            {selectedAccountProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
           {canManage && (
             <button onClick={() => setIsFormOpen((open) => !open)} className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">
@@ -348,20 +458,31 @@ export default function TaskTracker() {
 
       {isFormOpen && (
         <form onSubmit={handleCreate} className="bg-surface border border-border rounded-xl p-5 shadow-sm space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} required minLength={3} placeholder="Task title" className="md:col-span-2 bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
-            <select value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value, assigneeId: '', extraAssigneeIds: [] })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
-              {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <select aria-label="Task account" value={form.accountId} onChange={(event) => setForm({ ...form, accountId: event.target.value, projectId: '', assigneeId: '', extraAssigneeIds: [] })} required className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
+              <option value="">Select account</option>
+              {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
             </select>
-            <input type="date" value={form.dueDate} onChange={(event) => setForm({ ...form, dueDate: event.target.value })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
+            <select aria-label="Task project" value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value, assigneeId: '', extraAssigneeIds: [] })} required className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
+              <option value="">Select project</option>
+              {formProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+            <select value={form.taskType} onChange={(event) => setForm({ ...form, taskType: event.target.value as TaskType })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
+              {taskTypeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <select value={form.assigneeId} onChange={(event) => setForm({ ...form, assigneeId: event.target.value, extraAssigneeIds: form.extraAssigneeIds.filter((id) => id !== event.target.value) })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
-              <option value="">Primary assignee</option>
-              {employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+            <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} required minLength={3} placeholder="Task title" className="md:col-span-2 bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
+            <input aria-label="Start date" type="date" value={form.startDate} onChange={(event) => setForm({ ...form, startDate: event.target.value })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
+            <input aria-label="Due date" type="date" min={form.startDate || undefined} value={form.dueDate} onChange={(event) => setForm({ ...form, dueDate: event.target.value })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <select disabled={!form.projectId || loadingAssignees} value={form.assigneeId} onChange={(event) => setForm({ ...form, assigneeId: event.target.value, extraAssigneeIds: form.extraAssigneeIds.filter((id) => id !== event.target.value) })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 disabled:opacity-60">
+              <option value="">{loadingAssignees ? 'Loading allocated developers...' : 'Primary assignee (optional)'}</option>
+              {eligibleAssignees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} — {employee.title}</option>)}
             </select>
-            <select multiple value={form.extraAssigneeIds} onChange={(event) => setForm({ ...form, extraAssigneeIds: Array.from(event.target.selectedOptions, (option) => option.value) })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 min-h-10">
-              {employees.filter((employee) => employee.id !== form.assigneeId).map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+            <select aria-label="Additional assignees" disabled={!form.projectId || loadingAssignees} multiple value={form.extraAssigneeIds} onChange={(event) => setForm({ ...form, extraAssigneeIds: Array.from(event.target.selectedOptions, (option) => option.value) })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 min-h-10 disabled:opacity-60">
+              {eligibleAssignees.filter((employee) => employee.id !== form.assigneeId).map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
             </select>
             <select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value as TaskPriority })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
               <option value="low">Low</option>
@@ -373,6 +494,9 @@ export default function TaskTracker() {
               {statusColumns.map((status) => <option key={status.key} value={status.key}>{status.label}</option>)}
             </select>
           </div>
+          {form.projectId && !loadingAssignees && eligibleAssignees.length === 0 && (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">No developers are allocated to this project. Allocate a developer before creating an assigned task.</p>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-[1fr_180px_180px_auto] gap-3">
             <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Description" rows={3} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 resize-none" />
             <input value={form.labels} onChange={(event) => setForm({ ...form, labels: event.target.value })} placeholder="Labels" className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 h-10" />
@@ -420,7 +544,15 @@ export default function TaskTracker() {
           </select>
           <select value={assigneeFilter} onChange={(event) => setAssigneeFilter(event.target.value)} className="rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs">
             <option value="">All assignees</option>
-            {employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+            {taskAssigneeOptions.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+          </select>
+          <select value={taskTypeFilter} onChange={(event) => setTaskTypeFilter(event.target.value as TaskType | 'all')} className="rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs">
+            <option value="all">All task types</option>
+            {taskTypeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <select value={reporterFilter} onChange={(event) => setReporterFilter(event.target.value)} className="rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs">
+            <option value="">All creators</option>
+            {reporterOptions.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
           </select>
           <button onClick={clearFilters} className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-ink-soft hover:bg-surface-alt"><Filter size={14} /> Clear</button>
         </div>
@@ -546,7 +678,7 @@ export default function TaskTracker() {
                     {columnTasks.map((task) => {
                       const assignee = employees.find((employee) => employee.id === task.assignee_id);
                       const isDragged = draggedTaskId === task.id;
-                      const canDrag = previewRole !== 'employee' || task.assignee_id === currentUser?.id;
+                      const canDrag = previewRole !== 'employee' || task.assignee_id === currentUser?.id || Boolean(currentUser && task.assignee_ids?.includes(currentUser.id));
                       return (
                         <article
                           key={task.id}
@@ -589,6 +721,9 @@ export default function TaskTracker() {
                           <p className="line-clamp-2 text-[11px] leading-relaxed text-ink-soft">{task.description || 'No description captured.'}</p>
 
                           <div className="flex flex-col gap-1">
+                            <span className="w-fit rounded-full border border-border bg-surface-alt px-2 py-0.5 text-[10px] font-semibold text-ink-soft">
+                              {taskTypeOptions.find((option) => option.value === task.task_type)?.label || 'Other'}
+                            </span>
                             <span className={`w-fit rounded-full px-2 py-0.5 text-[10px] font-bold ${priorityClass[task.priority]}`}>
                               {task.priority.toUpperCase()}
                             </span>
@@ -729,16 +864,28 @@ export default function TaskTracker() {
                 </div>
               </div>
               <div className="space-y-3 text-xs">
-                <select value={selectedTask.status} onChange={(event) => handleStatusChange(selectedTask, event.target.value as TaskStatus)} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2">
+                <select value={selectedTask.status} onChange={(event) => { void handleStatusChange(selectedTask, event.target.value as TaskStatus).catch(() => undefined); }} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2">
                   {statusColumns.map((status) => <option key={status.key} value={status.key}>{status.label}</option>)}
                 </select>
                 <div className="rounded-lg border border-border bg-surface-alt p-3">
-                  <p className="font-bold text-ink">Assignee</p>
-                  <p className="mt-1 text-ink-soft">{selectedTask.assignee_name || 'Unassigned'}</p>
+                  <p className="font-bold text-ink">Account / Project</p>
+                  <p className="mt-1 text-ink-soft">{selectedTask.account_name || '-'} / {selectedTask.project_name || '-'}</p>
                 </div>
                 <div className="rounded-lg border border-border bg-surface-alt p-3">
-                  <p className="font-bold text-ink">Due / Effort</p>
-                  <p className="mt-1 text-ink-soft">{selectedTask.due_date || '-'} / {selectedTask.estimate_hours}h est / {selectedTask.actual_hours}h actual</p>
+                  <p className="font-bold text-ink">Type / Priority</p>
+                  <p className="mt-1 text-ink-soft">{taskTypeOptions.find((option) => option.value === selectedTask.task_type)?.label || 'Other'} / {selectedTask.priority}</p>
+                </div>
+                <div className="rounded-lg border border-border bg-surface-alt p-3">
+                  <p className="font-bold text-ink">Assignee / Created by</p>
+                  <p className="mt-1 text-ink-soft">{selectedTask.assignee_name || 'Unassigned'} / {selectedTask.reporter_name || '-'}</p>
+                </div>
+                <div className="rounded-lg border border-border bg-surface-alt p-3">
+                  <p className="font-bold text-ink">Schedule / Effort</p>
+                  <p className="mt-1 text-ink-soft">{selectedTask.start_date || '-'} to {selectedTask.due_date || '-'} / {selectedTask.estimate_hours}h est / {selectedTask.actual_hours}h actual</p>
+                </div>
+                <div className="rounded-lg border border-border bg-surface-alt p-3">
+                  <p className="font-bold text-ink">Created / Updated</p>
+                  <p className="mt-1 text-ink-soft">{new Date(selectedTask.created_at).toLocaleString()} / {new Date(selectedTask.updated_at).toLocaleString()}</p>
                 </div>
                 <div className="rounded-lg border border-border bg-surface-alt p-3">
                   <p className="font-bold text-ink">Labels</p>

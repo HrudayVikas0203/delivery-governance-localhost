@@ -23,6 +23,19 @@ class TaskPriority(str, enum.Enum):
     CRITICAL = "critical"
 
 
+class TaskType(str, enum.Enum):
+    DEVELOPMENT = "development"
+    BUG_FIX = "bug_fix"
+    ENHANCEMENT = "enhancement"
+    TESTING = "testing"
+    CODE_REVIEW = "code_review"
+    DOCUMENTATION = "documentation"
+    DEPLOYMENT = "deployment"
+    RESEARCH = "research"
+    SUPPORT = "support"
+    OTHER = "other"
+
+
 class Task(Base):
     __tablename__ = "tasks"
     __table_args__ = (UniqueConstraint("project_id", "title", name="uq_task_project_title"),)
@@ -31,10 +44,12 @@ class Task(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)
     title: Mapped[str] = mapped_column(String(220), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    task_type: Mapped[TaskType] = mapped_column(Enum(TaskType), index=True, nullable=False, default=TaskType.OTHER)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), index=True, nullable=False, default=TaskStatus.TODO)
     priority: Mapped[TaskPriority] = mapped_column(Enum(TaskPriority), index=True, nullable=False, default=TaskPriority.MEDIUM)
     assignee_id: Mapped[str | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), index=True)
     reporter_id: Mapped[str | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"))
+    start_date: Mapped[date | None] = mapped_column(Date)
     due_date: Mapped[date | None] = mapped_column(Date)
     estimate_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     actual_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

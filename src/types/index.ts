@@ -234,19 +234,25 @@ export interface ResourceAllocation {
 
 export type TaskStatus = 'todo' | 'in_progress' | 'review' | 'blocked' | 'done';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
+export type TaskType = 'development' | 'bug_fix' | 'enhancement' | 'testing' | 'code_review' | 'documentation' | 'deployment' | 'research' | 'support' | 'other';
 
 export interface DeliveryTask {
   id: string;
   project_id: string;
+  account_id: string;
+  account_name?: string | null;
   project_name?: string | null;
   title: string;
   description?: string | null;
+  task_type: TaskType;
   status: TaskStatus;
   priority: TaskPriority;
   assignee_id?: string | null;
   assignee_name?: string | null;
   assignee_ids?: string[];
   reporter_id?: string | null;
+  reporter_name?: string | null;
+  start_date?: string | null;
   due_date?: string | null;
   estimate_hours: number;
   actual_hours: number;
