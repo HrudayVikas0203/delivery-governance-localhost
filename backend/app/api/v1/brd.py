@@ -1,5 +1,7 @@
 import json
 import io
+import math
+import textwrap
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -44,16 +46,16 @@ def _json_load(value: str | None, fallback: object) -> object:
         return fallback
 
 
-def _gemini_json(prompt: str) -> tuple[dict, str]:
+def _gemini_json(prompt: str, model: str | None = None) -> tuple[dict, str]:
     try:
-        text, model = generate_text("gemini", prompt)
+        text, model_used = generate_text("gemini", prompt, model)
         cleaned = text.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
         payload = json.loads(cleaned)
         if not isinstance(payload, dict):
             raise ValueError("Gemini response is not an object")
-        return payload, model
+        return payload, model_used
     except HTTPException:
         raise
     except (ValueError, json.JSONDecodeError) as exc:
@@ -64,68 +66,324 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
     if artifact_type == "business_flow":
         nodes = payload.get("nodes")
         edges = payload.get("edges")
-        if not isinstance(nodes, list) or len(nodes) < 3 or not isinstance(edges, list):
+        if not isinstance(nodes, list) or len(nodes) < 3 or not isinstance(edges, list) or len(edges) < 2:
             raise HTTPException(status_code=502, detail="Gemini returned an incomplete business flow.")
-        node_ids = {str(node.get("id")) for node in nodes if isinstance(node, dict) and node.get("id")}
-        if len(node_ids) != len(nodes) or any(edge.get("source") not in node_ids or edge.get("target") not in node_ids for edge in edges if isinstance(edge, dict)):
+        node_ids = {
+            str(node.get("id"))
+            for node in nodes
+            if isinstance(node, dict) and node.get("id") and node.get("label")
+        }
+        valid_edges = [edge for edge in edges if isinstance(edge, dict)]
+        if len(node_ids) != len(nodes) or len(valid_edges) != len(edges) or any(
+            edge.get("source") not in node_ids or edge.get("target") not in node_ids
+            for edge in valid_edges
+        ):
             raise HTTPException(status_code=502, detail="Gemini returned invalid business-flow connections.")
     elif artifact_type == "architecture":
         layers = payload.get("layers")
         if not isinstance(layers, list) or len(layers) < 3:
             raise HTTPException(status_code=502, detail="Gemini returned an incomplete solution architecture.")
         for layer in layers:
-            if not isinstance(layer, dict) or not layer.get("name") or not isinstance(layer.get("components"), list):
+            if not isinstance(layer, dict) or not layer.get("name") or not isinstance(layer.get("components"), list) or not layer["components"]:
                 raise HTTPException(status_code=502, detail="Gemini returned an invalid solution architecture.")
+            if any(
+                not (isinstance(component, str) and component.strip())
+                and not (isinstance(component, dict) and component.get("name"))
+                for component in layer["components"]
+            ):
+                raise HTTPException(status_code=502, detail="Gemini returned architecture components without names.")
+        component_names = {
+            str(component.get("name") if isinstance(component, dict) else component).strip().lower()
+            for layer in layers
+            for component in layer.get("components", [])
+        }
+        external_systems = payload.get("external_systems", [])
+        if isinstance(external_systems, list):
+            component_names.update(
+                str(system.get("name") if isinstance(system, dict) else system).strip().lower()
+                for system in external_systems
+                if (isinstance(system, str) and system.strip()) or (isinstance(system, dict) and system.get("name"))
+            )
+        connections = []
+        for key in ("connections", "relationships"):
+            if isinstance(payload.get(key), list):
+                connections.extend(payload[key])
+        if not connections:
+            raise HTTPException(status_code=502, detail="Gemini returned a solution architecture without component connections.")
+        for connection in connections:
+            if not isinstance(connection, dict):
+                raise HTTPException(status_code=502, detail="Gemini returned invalid architecture connections.")
+            source = str(connection.get("from") or connection.get("source") or "").strip().lower()
+            target = str(connection.get("to") or connection.get("target") or "").strip().lower()
+            if source not in component_names or target not in component_names:
+                raise HTTPException(status_code=502, detail="Gemini returned architecture connections with unknown components.")
     return payload
+
+
+def _extract_document_text(content: bytes, filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    try:
+        if suffix == ".pdf":
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(content))
+            extracted = "\n".join(page.extract_text() or "" for page in reader.pages)
+        elif suffix == ".docx":
+            from docx import Document
+
+            document = Document(io.BytesIO(content))
+            paragraphs = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+            table_rows = [
+                " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                for table in document.tables
+                for row in table.rows
+            ]
+            extracted = "\n".join([*paragraphs, *filter(None, table_rows)])
+        elif suffix in {".txt", ".md"}:
+            extracted = content.decode("utf-8-sig", errors="replace")
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="BRD files must use PDF, DOCX, TXT, or Markdown format.",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="The selected BRD file could not be read.") from exc
+
+    normalized = "\n".join(line.strip() for line in extracted.splitlines() if line.strip())
+    if not normalized:
+        raise HTTPException(
+            status_code=422,
+            detail="No readable text was found in the BRD. Scanned documents require OCR before upload.",
+        )
+    return normalized[:120000]
 
 
 def _artifact_sections(artifact: BRDDesignArtifact) -> list[tuple[str, list[str]]]:
     payload = _json_load(artifact.payload_json, {})
     if not isinstance(payload, dict):
-        return [(artifact.title, [str(payload)])]
+        return [(artifact.title, ["No structured artifact content is available."])]
     sections: list[tuple[str, list[str]]] = []
     if artifact.artifact_type == "business_flow":
         for node in payload.get("nodes", []):
             if isinstance(node, dict):
-                detail = node.get("description") or node.get("type") or "Process step"
-                sections.append((str(node.get("label") or node.get("id") or "Step"), [str(detail)]))
+                details = []
+                if node.get("description"):
+                    details.append(str(node["description"]))
+                if node.get("actor") or node.get("system"):
+                    details.append(f"Actor/System: {node.get('actor') or node.get('system')}")
+                if node.get("inputs"):
+                    details.append(f"Inputs: {', '.join(map(str, node['inputs']))}")
+                if node.get("outputs"):
+                    details.append(f"Outputs: {', '.join(map(str, node['outputs']))}")
+                if node.get("business_rule"):
+                    details.append(f"Rule: {node['business_rule']}")
+                sections.append((str(node.get("label") or node.get("id") or "Step"), details or ["Process step"]))
     else:
         for layer in payload.get("layers", []):
             if isinstance(layer, dict):
-                components = [str(item) for item in layer.get("components", [])]
+                components = []
+                for item in layer.get("components", []):
+                    if isinstance(item, dict):
+                        detail = item.get("responsibility") or item.get("description")
+                        technology = item.get("technology")
+                        suffix = " — ".join(str(value) for value in (detail, technology) if value)
+                        components.append(f"{item.get('name', 'Component')}{': ' + suffix if suffix else ''}")
+                    elif isinstance(item, str):
+                        components.append(item)
                 if layer.get("purpose"):
                     components.insert(0, str(layer["purpose"]))
                 sections.append((str(layer.get("name") or "Layer"), components))
+        for heading, key in (("Security", "security"), ("Deployment", "deployment")):
+            values = payload.get(key)
+            if isinstance(values, list) and values:
+                sections.append((heading, [str(value) for value in values]))
     return sections
 
 
-def _drawio_bytes(artifact: BRDDesignArtifact) -> bytes:
-    payload = _json_load(artifact.payload_json, {})
-    nodes = []
+def _flow_positions(nodes: list[dict], edges: list[dict]) -> dict[str, tuple[int, int]]:
+    node_ids = [str(node.get("id")) for node in nodes]
+    incoming = {node_id: 0 for node_id in node_ids}
+    outgoing = {node_id: [] for node_id in node_ids}
+    for edge in edges:
+        source, target = str(edge.get("source", "")), str(edge.get("target", ""))
+        if source in outgoing and target in incoming:
+            outgoing[source].append(target)
+            incoming[target] += 1
+    ranks = {node_id: 0 for node_id in node_ids}
+    pending = dict(incoming)
+    queue = [node_id for node_id in node_ids if pending[node_id] == 0]
+    visited = set()
+    while queue:
+        node_id = queue.pop(0)
+        visited.add(node_id)
+        for target in outgoing[node_id]:
+            ranks[target] = max(ranks[target], ranks[node_id] + 1)
+            pending[target] -= 1
+            if pending[target] == 0:
+                queue.append(target)
+    for node_id in node_ids:
+        if node_id not in visited:
+            ranks[node_id] = max(ranks.values(), default=0) + 1
+    groups: dict[int, list[str]] = {}
+    for node_id in node_ids:
+        groups.setdefault(ranks[node_id], []).append(node_id)
+    return {node_id: (60 + rank * 330, 110 + row * 155) for rank, group in groups.items() for row, node_id in enumerate(group)}
+
+
+def _architecture_graph(payload: dict) -> tuple[list[dict], list[dict]]:
+    nodes: list[dict] = []
+    name_to_id: dict[str, str] = {}
+    column = 0
+    external = payload.get("external_systems", [])
+    if isinstance(external, list) and external:
+        for row, item in enumerate(external):
+            component = {"name": item} if isinstance(item, str) else item
+            if not isinstance(component, dict) or not component.get("name"):
+                continue
+            node_id = f"external-{row}"
+            name_to_id[str(component["name"]).lower()] = node_id
+            nodes.append({"id": node_id, "label": component["name"], "description": component.get("description", "External system"), "x": 60, "y": 110 + row * 145, "style": "external"})
+        column = 1
+    for layer_index, layer in enumerate(payload.get("layers", [])):
+        if not isinstance(layer, dict):
+            continue
+        for row, item in enumerate(layer.get("components", [])):
+            component = {"name": item} if isinstance(item, str) else item
+            if not isinstance(component, dict) or not component.get("name"):
+                continue
+            node_id = f"layer-{layer_index}-component-{row}"
+            name_to_id[str(component["name"]).lower()] = node_id
+            detail = component.get("responsibility") or component.get("description") or component.get("technology") or layer.get("purpose", "")
+            nodes.append({"id": node_id, "label": component["name"], "description": detail, "layer": layer.get("name", "Layer"), "x": 60 + (column + layer_index) * 330, "y": 110 + row * 145, "style": f"layer-{layer_index % 5}"})
     edges = []
+    relationships = []
+    for key in ("relationships", "connections"):
+        if isinstance(payload.get(key), list):
+            relationships.extend(payload[key])
+    for relationship in relationships:
+        if not isinstance(relationship, dict):
+            continue
+        source_name = str(relationship.get("source") or relationship.get("from") or "").lower()
+        target_name = str(relationship.get("target") or relationship.get("to") or "").lower()
+        if source_name in name_to_id and target_name in name_to_id:
+            edges.append({"source": name_to_id[source_name], "target": name_to_id[target_name], "label": relationship.get("label") or relationship.get("protocol") or relationship.get("type") or ""})
+    return nodes, edges
+
+
+def _artifact_graph(artifact: BRDDesignArtifact) -> tuple[list[dict], list[dict]]:
+    payload = _json_load(artifact.payload_json, {})
+    if not isinstance(payload, dict):
+        return [], []
     if artifact.artifact_type == "business_flow":
-        nodes = payload.get("nodes", []) if isinstance(payload, dict) else []
-        edges = payload.get("edges", []) if isinstance(payload, dict) else []
-    else:
-        for index, layer in enumerate(payload.get("layers", []) if isinstance(payload, dict) else []):
-            nodes.append({"id": f"layer-{index}", "label": layer.get("name"), "description": ", ".join(layer.get("components", []))})
-            if index:
-                edges.append({"source": f"layer-{index-1}", "target": f"layer-{index}", "label": "data flow"})
+        nodes = [node for node in payload.get("nodes", []) if isinstance(node, dict)]
+        edges = [edge for edge in payload.get("edges", []) if isinstance(edge, dict)]
+        positions = _flow_positions(nodes, edges)
+        normalized = []
+        for node in nodes:
+            node_id = str(node.get("id", ""))
+            x, y = positions.get(node_id, (60, 110))
+            detail_parts = [node.get("description"), node.get("actor") or node.get("system")]
+            normalized.append({**node, "id": node_id, "x": x, "y": y, "description": " | ".join(str(value) for value in detail_parts if value)})
+        return normalized, edges
+    return _architecture_graph(payload)
+
+
+def _drawio_bytes(artifact: BRDDesignArtifact) -> bytes:
+    nodes, edges = _artifact_graph(artifact)
     cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
     ids = set()
+    palette = {"external": ("FFF7ED", "FB923C"), "layer-0": ("F5F3FF", "8B5CF6"), "layer-1": ("EFF6FF", "3B82F6"), "layer-2": ("ECFEFF", "06B6D4"), "layer-3": ("F0FDF4", "22C55E"), "layer-4": ("F8FAFC", "64748B")}
     for index, node in enumerate(nodes):
         node_id = str(node.get("id") or f"node-{index}")
         ids.add(node_id)
-        value = escape(f"{node.get('label', node_id)}&#xa;{node.get('description', '')}")
-        x = 60 + (index % 3) * 280
-        y = 60 + (index // 3) * 150
-        cells.append(f'<mxCell id="{escape(node_id)}" value="{value}" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1"><mxGeometry x="{x}" y="{y}" width="220" height="90" as="geometry"/></mxCell>')
+        label = escape(str(node.get("label") or node_id))
+        detail = escape(str(node.get("description") or ""))
+        value = f"&lt;b&gt;{label}&lt;/b&gt;{'&#xa;' + detail if detail else ''}"
+        fill, stroke = palette.get(str(node.get("style")), ("EFF6FF", "3B82F6"))
+        shape = "rhombus;" if str(node.get("type", "")).lower() == "decision" else "rounded=1;arcSize=12;"
+        dashed = "dashed=1;" if node.get("style") == "external" else ""
+        cells.append(f'<mxCell id="{escape(node_id)}" value="{value}" style="{shape}{dashed}whiteSpace=wrap;html=1;fillColor=#{fill};strokeColor=#{stroke};fontColor=#0F172A;spacing=10;" vertex="1" parent="1"><mxGeometry x="{int(node.get("x", 60))}" y="{int(node.get("y", 110))}" width="250" height="105" as="geometry"/></mxCell>')
     for index, edge in enumerate(edges):
         source, target = str(edge.get("source", "")), str(edge.get("target", ""))
         if source in ids and target in ids:
-            cells.append(f'<mxCell id="edge-{index}" value="{escape(str(edge.get("label", "")))}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="{escape(source)}" target="{escape(target)}"><mxGeometry relative="1" as="geometry"/></mxCell>')
-    xml = f'<mxfile host="app.diagrams.net"><diagram name="{escape(artifact.title)}"><mxGraphModel><root>{"".join(cells)}</root></mxGraphModel></diagram></mxfile>'
+            cells.append(f'<mxCell id="edge-{index}" value="{escape(str(edge.get("label", "")))}" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#64748B;" edge="1" parent="1" source="{escape(source)}" target="{escape(target)}"><mxGeometry relative="1" as="geometry"/></mxCell>')
+    xml = f'<mxfile host="app.diagrams.net"><diagram name="{escape(artifact.title)}"><mxGraphModel grid="1" gridSize="10"><root>{"".join(cells)}</root></mxGraphModel></diagram></mxfile>'
     return xml.encode("utf-8")
+
+
+def _font(size: int, bold: bool = False):
+    from PIL import ImageFont
+
+    candidates = ["arialbd.ttf" if bold else "arial.ttf", "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _arrow(draw, start: tuple[float, float], end: tuple[float, float], color: str = "#64748b") -> None:
+    draw.line([start, end], fill=color, width=4)
+    angle = math.atan2(end[1] - start[1], end[0] - start[0])
+    size = 13
+    draw.polygon(
+        [
+            end,
+            (end[0] - size * math.cos(angle - math.pi / 6), end[1] - size * math.sin(angle - math.pi / 6)),
+            (end[0] - size * math.cos(angle + math.pi / 6), end[1] - size * math.sin(angle + math.pi / 6)),
+        ],
+        fill=color,
+    )
+
+
+def _diagram_png(artifact: BRDDesignArtifact) -> bytes:
+    from PIL import Image, ImageDraw
+
+    nodes, edges = _artifact_graph(artifact)
+    max_x = max((int(node.get("x", 0)) for node in nodes), default=900)
+    max_y = max((int(node.get("y", 0)) for node in nodes), default=420)
+    width, height = max(1400, max_x + 340), max(620, max_y + 210)
+    image = Image.new("RGB", (width, height), "#f8fafc")
+    draw = ImageDraw.Draw(image)
+    title_font, heading_font, body_font, small_font = _font(25, True), _font(17, True), _font(13), _font(11, True)
+    draw.rounded_rectangle((28, 24, width - 28, 84), radius=14, fill="#0f172a")
+    draw.text((52, 40), artifact.title, fill="white", font=title_font)
+    by_id = {str(node.get("id")): node for node in nodes}
+    for edge in edges:
+        source, target = by_id.get(str(edge.get("source"))), by_id.get(str(edge.get("target")))
+        if not source or not target:
+            continue
+        start = (int(source.get("x", 0)) + 250, int(source.get("y", 0)) + 52)
+        end = (int(target.get("x", 0)), int(target.get("y", 0)) + 52)
+        _arrow(draw, start, end)
+        label = str(edge.get("label") or "")
+        if label:
+            draw.text(((start[0] + end[0]) / 2, (start[1] + end[1]) / 2 - 18), label[:32], fill="#334155", font=small_font, anchor="mm")
+    colors = [("#f5f3ff", "#8b5cf6"), ("#eff6ff", "#3b82f6"), ("#ecfeff", "#06b6d4"), ("#f0fdf4", "#22c55e"), ("#fff7ed", "#fb923c")]
+    for index, node in enumerate(nodes):
+        x, y = int(node.get("x", 60)), int(node.get("y", 110))
+        fill, outline = colors[index % len(colors)]
+        if node.get("style") == "external" or node.get("type") == "exception":
+            fill, outline = "#fff7ed", "#fb923c"
+        is_decision = str(node.get("type", "")).lower() == "decision"
+        if is_decision:
+            draw.polygon([(x + 125, y), (x + 250, y + 52), (x + 125, y + 104), (x, y + 52)], fill=fill, outline=outline, width=3)
+        else:
+            draw.rounded_rectangle((x, y, x + 250, y + 104), radius=12, fill=fill, outline=outline, width=3)
+        label = str(node.get("label") or "Component")
+        details = str(node.get("description") or "")
+        if is_decision:
+            draw.multiline_text((x + 125, y + 25), "\n".join(textwrap.wrap(label, 22)[:2]), fill="#0f172a", font=heading_font, anchor="ma", align="center", spacing=3)
+        else:
+            draw.multiline_text((x + 14, y + 13), "\n".join(textwrap.wrap(label, 31)[:2]), fill="#0f172a", font=heading_font, spacing=3)
+            if details:
+                draw.multiline_text((x + 14, y + 58), "\n".join(textwrap.wrap(details, 38)[:2]), fill="#475569", font=body_font, spacing=2)
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
 
 
 def _artifact_export(artifact: BRDDesignArtifact, export_format: str) -> tuple[bytes, str, str]:
@@ -133,24 +391,38 @@ def _artifact_export(artifact: BRDDesignArtifact, export_format: str) -> tuple[b
     safe_stem = "".join(char if char.isalnum() or char in "-_" else "_" for char in artifact.title).strip("_") or "architecture"
     if export_format in {"drawio", "io"}:
         return _drawio_bytes(artifact), "application/vnd.jgraph.mxfile", f"{safe_stem}.drawio"
+    diagram_png = _diagram_png(artifact)
+    if export_format == "png":
+        return diagram_png, "image/png", f"{safe_stem}.png"
     if export_format == "pdf":
-        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        from reportlab.platypus import Image as ReportImage, Paragraph, SimpleDocTemplate, Spacer
 
         output = io.BytesIO()
         styles = getSampleStyleSheet()
-        document = SimpleDocTemplate(output, pagesize=A4)
+        page_size = landscape(A4)
+        document = SimpleDocTemplate(output, pagesize=page_size, leftMargin=28, rightMargin=28, topMargin=28, bottomMargin=28)
         story = [Paragraph(escape(artifact.title), styles["Title"]), Spacer(1, 12)]
+        diagram = ReportImage(io.BytesIO(diagram_png))
+        scale = min((page_size[0] - 56) / diagram.imageWidth, (page_size[1] - 120) / diagram.imageHeight)
+        diagram.drawWidth, diagram.drawHeight = diagram.imageWidth * scale, diagram.imageHeight * scale
+        story.extend([diagram, Spacer(1, 16)])
         for heading, lines in sections:
             story.extend([Paragraph(escape(heading), styles["Heading2"]), Paragraph(escape(" • ".join(lines)), styles["BodyText"]), Spacer(1, 8)])
         document.build(story)
         return output.getvalue(), "application/pdf", f"{safe_stem}.pdf"
     if export_format == "docx":
         from docx import Document
+        from docx.enum.section import WD_ORIENT
+        from docx.shared import Inches
 
         document = Document()
+        section = document.sections[0]
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
         document.add_heading(artifact.title, 0)
+        document.add_picture(io.BytesIO(diagram_png), width=Inches(9.2))
         for heading, lines in sections:
             document.add_heading(heading, level=1)
             for line in lines:
@@ -158,25 +430,6 @@ def _artifact_export(artifact: BRDDesignArtifact, export_format: str) -> tuple[b
         output = io.BytesIO()
         document.save(output)
         return output.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{safe_stem}.docx"
-    if export_format == "png":
-        from PIL import Image, ImageDraw, ImageFont
-
-        width = 1400
-        block_height = 120
-        height = max(500, 130 + len(sections) * block_height)
-        image = Image.new("RGB", (width, height), "white")
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-        draw.rounded_rectangle((35, 25, width - 35, 90), radius=16, fill="#0f172a")
-        draw.text((60, 50), artifact.title, fill="white", font=font)
-        for index, (heading, lines) in enumerate(sections):
-            y = 115 + index * block_height
-            draw.rounded_rectangle((60, y, width - 60, y + 90), radius=12, fill="#eff6ff", outline="#60a5fa", width=2)
-            draw.text((85, y + 18), heading, fill="#1d4ed8", font=font)
-            draw.text((85, y + 45), " | ".join(lines)[:180], fill="#334155", font=font)
-        output = io.BytesIO()
-        image.save(output, format="PNG")
-        return output.getvalue(), "image/png", f"{safe_stem}.png"
     raise HTTPException(status_code=422, detail="Export format must be pdf, docx, png, or drawio")
 
 
@@ -267,6 +520,9 @@ async def upload_document(
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="BRD file exceeds the 10 MB limit")
     safe_filename = Path(file.filename or "uploaded-brd").name
+    if not content:
+        raise HTTPException(status_code=422, detail="The selected BRD file is empty.")
+    extracted_text = _extract_document_text(content, safe_filename)
     document = BRDDocument(
         project_id=project_id,
         filename=safe_filename,
@@ -275,7 +531,7 @@ async def upload_document(
         size_bytes=len(content),
         status=BRDDocumentStatus.READY,
         uploaded_by_id=actor.id,
-        extracted_text=content.decode("utf-8", errors="ignore")[:120000],
+        extracted_text=extracted_text,
     )
     db.add(document)
     db.flush()
@@ -532,6 +788,7 @@ def generate_brd_asset(
         "overview": getattr(latest_requirements, "overview", None) if latest_requirements else None,
         "functional": getattr(latest_requirements, "functional", []) if latest_requirements else [],
         "nonFunctional": getattr(latest_requirements, "non_functional", []) if latest_requirements else [],
+        "assumptions": getattr(latest_requirements, "assumptions", []) if latest_requirements else [],
     }
 
     provider_used = "gemini"
@@ -539,7 +796,8 @@ def generate_brd_asset(
         result, model_used = _gemini_json(
             "Return only JSON with overview, functional, nonFunctional, assumptions. "
             "Extract requirements from the supplied BRD; do not invent project facts. "
-            f"Project: {project.name}\nBRD:\n{doc_text[:12000]}"
+            f"Project: {project.name}\nBRD:\n{doc_text[:16000]}",
+            payload.model,
         )
         if document:
             saved = save_requirements(
@@ -560,35 +818,50 @@ def generate_brd_asset(
 
     if payload.artifact_type == "business_flow":
         schema = (
-            '{"nodes":[{"id":"stable-id","label":"editable label","description":"specific step",'
-            '"type":"actor|process|decision|input|output|exception","actor":"role or system",'
-            '"inputs":["..."],"outputs":["..."]}],'
+            '{"nodes":[{"id":"stable-kebab-case-id","label":"concise step name","description":"specific business activity",'
+            '"type":"start|process|decision|input|output|exception|end","actor":"business role or system",'
+            '"system":"system name when explicit","inputs":["named input"],"outputs":["named output"],'
+            '"business_rule":"rule only when supported","status":"stage when supported"}],'
             '"edges":[{"source":"node-id","target":"node-id","label":"condition or outcome",'
-            '"kind":"normal|alternate|exception"}]}'
+            '"kind":"normal|alternate|exception"}],'
+            '"swimlanes":[{"name":"role or system","description":"responsibility"}],"outcome":"supported end result"}'
         )
         instructions = (
-            "Create a detailed, logically correct and editable business process. Include actors, inputs, outputs, "
-            "decisions, system interactions, and applicable alternate/exception paths. Every edge endpoint must "
-            "reference a node id. Avoid generic filler."
+            "Act as a senior business process architect. Create a logically complete process with one explicit start, "
+            "specific activity nodes, decision gateways only where the source supports a business rule, and one or more "
+            "explicit outcomes. Include actors, inputs, outputs, system interactions, and supported alternate or exception "
+            "paths. Decision outgoing edges must have meaningful condition labels. Every edge endpoint must reference a "
+            "node id. Use 5-12 information-rich nodes where the source permits; never use generic filler or invent policy."
         )
     else:
         schema = (
-            '{"layers":[{"name":"layer","purpose":"specific purpose","components":["component"],'
-            '"securityBoundary":"boundary or none"}],'
-            '"connections":[{"from":"component","to":"component","label":"protocol/data flow"}],'
-            '"deployment":["runtime/infrastructure detail"],"security":["control"],"decisions":["decision"]}'
+            '{"title":"context-specific architecture title","objective":"business and technical objective",'
+            '"layers":[{"name":"supported architectural layer","purpose":"specific responsibility",'
+            '"securityBoundary":"boundary when supported","components":[{"name":"unique component name",'
+            '"type":"experience|api|service|integration|messaging|ai|database|storage|infrastructure",'
+            '"responsibility":"specific responsibility","technology":"technology only when supported"}]}],'
+            '"external_systems":[{"name":"external system","type":"external","description":"integration purpose"}],'
+            '"connections":[{"from":"exact component or external-system name","to":"exact component name",'
+            '"label":"data flow","protocol":"protocol only when supported"}],'
+            '"cross_cutting_concerns":{"Identity and access":["supported control"],"Observability":["supported capability"]},'
+            '"deployment":["runtime or cloud detail"],"security":["specific control"],'
+            '"decisions":[{"decision":"decision","rationale":"reason","trade_offs":"trade-off"}],'
+            '"risks":[{"description":"risk","impact":"impact","mitigation":"mitigation"}],"so_what":"executive value"}'
         )
         instructions = (
-            "Create a professional high-level solution architecture that is still technically meaningful. Cover "
-            "actors, frontend, API/backend, authentication, business services, data stores, AI/LLM, storage, "
-            "external integrations, data flow, security boundaries, and deployment where relevant. Use only "
-            "requirements supported by context and do not hard-code this platform's own stack."
+            "Act as a senior enterprise solution architect. Produce a client-ready architecture with distinct, correctly "
+            "ordered layers and 2-5 meaningful components per layer where supported. Separate external systems from the "
+            "solution boundary. Represent actual component-to-component data flows; connection endpoints must exactly match "
+            "component or external-system names. Include identity, security, observability, messaging, AI, data, and cloud "
+            "concerns only when supported by the supplied source. Never hard-code this application's stack or invent technology."
         )
     result, model_used = _gemini_json(
         f"Return only valid JSON matching this shape: {schema}\n{instructions}\n"
         f"Project: {project.name}\nDescription: {project.description or ''}\n"
         f"Requirements: {json.dumps(req_payload, ensure_ascii=False)[:12000]}\n"
-        f"Additional prompt: {(payload.prompt or '')[:2000]}"
+        f"BRD source text: {doc_text[:16000]}\n"
+        f"Additional prompt: {(payload.prompt or '')[:2000]}",
+        payload.model,
     )
     result = _validate_diagram_payload(payload.artifact_type, result)
     created = create_artifact(

@@ -66,6 +66,11 @@ export default function BRDStudio() {
   const [overview, setOverview] = useState('');
   const [functionalText, setFunctionalText] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [feedbackIsError, setFeedbackIsError] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [fileInputKey, setFileInputKey] = useState(0);
+  const [generatingKind, setGeneratingKind] = useState<ArtifactKind | 'requirements' | null>(null);
+  const [exportingArtifact, setExportingArtifact] = useState<string | null>(null);
 
   const activeProject = projects.find((project) => project.id === projectId);
   const latestDocument = documents[0];
@@ -88,7 +93,10 @@ export default function BRDStudio() {
       setRequirements(loadedRequirements);
       setArtifacts(loadedArtifacts);
     }
-    loadBRDData().catch((err) => setFeedback(err instanceof Error ? err.message : 'Unable to load BRD data.'));
+    loadBRDData().catch((err) => {
+      setFeedbackIsError(true);
+      setFeedback(err instanceof Error ? err.message : 'Unable to load BRD data.');
+    });
   }, [authToken, projectId]);
 
   const artifactCounts = useMemo(() => ({
@@ -106,14 +114,49 @@ export default function BRDStudio() {
   const handleUpload = async (event: FormEvent) => {
     event.preventDefault();
     if (!authToken || !selectedFile || !projectId) return;
-    const formData = new FormData();
-    formData.append('project_id', projectId);
-    formData.append('document_type', 'brd');
-    formData.append('file', selectedFile);
-    const uploaded = await apiUploadBRDDocument(formData, authToken);
-    setDocuments((current) => [uploaded, ...current]);
-    setSelectedFile(null);
-    setFeedback('BRD uploaded.');
+    setIsUploading(true);
+    setFeedback(null);
+    try {
+      const formData = new FormData();
+      formData.append('project_id', projectId);
+      formData.append('document_type', 'brd');
+      formData.append('file', selectedFile);
+      const uploaded = await apiUploadBRDDocument(formData, authToken);
+      setDocuments((current) => [uploaded, ...current]);
+      setSelectedFile(null);
+      setFileInputKey((current) => current + 1);
+      setFeedbackIsError(false);
+      setFeedback('BRD uploaded and added to the Document Register.');
+    } catch (error) {
+      setFeedbackIsError(true);
+      setFeedback(error instanceof Error ? error.message : 'Unable to upload the BRD. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleFileSelection = (file: File | null) => {
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (!extension || !['pdf', 'docx', 'txt', 'md'].includes(extension)) {
+      setSelectedFile(null);
+      setFileInputKey((current) => current + 1);
+      setFeedbackIsError(true);
+      setFeedback('Select a PDF, DOCX, TXT, or Markdown BRD file.');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setSelectedFile(null);
+      setFileInputKey((current) => current + 1);
+      setFeedbackIsError(true);
+      setFeedback('The selected BRD exceeds the 10 MB limit.');
+      return;
+    }
+    setFeedback(null);
+    setSelectedFile(file);
   };
 
   const handleSaveRequirements = async (event: FormEvent) => {
@@ -137,27 +180,49 @@ export default function BRDStudio() {
 
   const handleGenerate = async (kind: ArtifactKind | 'requirements') => {
     if (!authToken || !projectId) return;
-    const generated = await apiGenerateBRDAsset({
-      project_id: projectId,
-      document_id: latestDocument?.id || null,
-      artifact_type: kind,
-      provider: 'gemini',
-    }, authToken);
-    if (kind === 'requirements' && generated.requirements) {
-      const loadedRequirements = await apiListProjectRequirements(projectId, authToken);
-      setRequirements(loadedRequirements);
-    } else if (generated.artifact) {
-      setArtifacts((current) => [generated.artifact, ...current]);
+    setGeneratingKind(kind);
+    setFeedback(null);
+    try {
+      const generated = await apiGenerateBRDAsset({
+        project_id: projectId,
+        document_id: latestDocument?.id || null,
+        artifact_type: kind,
+        provider: 'gemini',
+      }, authToken);
+      if (kind === 'requirements' && generated.requirements) {
+        const loadedRequirements = await apiListProjectRequirements(projectId, authToken);
+        setRequirements(loadedRequirements);
+      } else if (generated.artifact) {
+        setArtifacts((current) => [generated.artifact, ...current]);
+      }
+      setFeedbackIsError(false);
+      setFeedback(`Generated ${kind.replace('_', ' ')} using ${generated.provider}.`);
+    } catch (error) {
+      setFeedbackIsError(true);
+      setFeedback(error instanceof Error ? error.message : `Unable to generate ${kind.replace('_', ' ')}.`);
+    } finally {
+      setGeneratingKind(null);
     }
-    setFeedback(`Generated ${kind.replace('_', ' ')} using ${generated.provider}.`);
   };
 
   const handleExportArtifact = async (kind: ArtifactKind, format: 'pdf' | 'docx' | 'png' | 'drawio') => {
     if (!authToken) return;
     const artifact = latestArtifacts[kind];
     if (artifact) {
-      const blob = await apiExportBRDArtifact(artifact.id, format, authToken);
-      downloadBlob(`${activeProject?.name || 'project'}-${kind}-v${artifact.version}.${format === 'drawio' ? 'drawio' : format}`, blob);
+      const exportKey = `${kind}-${format}`;
+      setExportingArtifact(exportKey);
+      try {
+        const blob = await apiExportBRDArtifact(artifact.id, format, authToken);
+        if (blob.size === 0) throw new Error('The generated export was empty.');
+        downloadBlob(`${activeProject?.name || 'project'}-${kind}-v${artifact.version}.${format === 'drawio' ? 'drawio' : format}`, blob);
+        setFeedbackIsError(false);
+        setFeedback(`${artifactMeta[kind].label} exported as ${format === 'drawio' ? 'draw.io' : format.toUpperCase()}.`);
+      } catch (error) {
+        setFeedbackIsError(true);
+        setFeedback(error instanceof Error ? error.message : 'Unable to export this artifact.');
+      } finally {
+        setExportingArtifact(null);
+      }
     }
   };
 
@@ -171,12 +236,12 @@ export default function BRDStudio() {
           </h1>
           <p className="text-sm text-ink-soft mt-1">Documents, requirements, editable business flows, and solution architecture under one project.</p>
         </div>
-        <select value={projectId} onChange={(event) => setProjectId(event.target.value)} className="bg-surface border border-border rounded-lg px-3 py-2 text-xs text-ink outline-none focus:border-cyan-600">
+        <select value={projectId} onChange={(event) => { setProjectId(event.target.value); setSelectedFile(null); setFileInputKey((current) => current + 1); }} className="bg-surface border border-border rounded-lg px-3 py-2 text-xs text-ink outline-none focus:border-cyan-600">
           {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         </select>
       </div>
 
-      {feedback && <div className="rounded-lg border border-cyan-100 bg-cyan-50 px-4 py-3 text-sm font-medium text-cyan-700">{feedback}</div>}
+      {feedback && <div className={`rounded-lg border px-4 py-3 text-sm font-medium ${feedbackIsError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-cyan-100 bg-cyan-50 text-cyan-700'}`}>{feedback}</div>}
 
       <div className="flex flex-wrap gap-2">
         {workspaceTabs.map((tab) => {
@@ -271,8 +336,8 @@ export default function BRDStudio() {
               <p className="text-xs text-ink-soft mt-1">Professional visual process representation derived from your requirements.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button onClick={() => handleGenerate('business_flow')} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-700">
-                <RefreshCw size={14} /> Regenerate
+              <button disabled={generatingKind !== null} onClick={() => handleGenerate('business_flow')} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-700 disabled:cursor-wait disabled:opacity-60">
+                <RefreshCw size={14} className={generatingKind === 'business_flow' ? 'animate-spin' : ''} /> {generatingKind === 'business_flow' ? 'Generating…' : 'Regenerate'}
               </button>
               <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs font-semibold text-ink-soft">
                 <History size={14} /> v{latestArtifacts.business_flow?.version || 0}
@@ -293,8 +358,8 @@ export default function BRDStudio() {
               <p className="text-xs text-ink-soft mt-1">Professional enterprise architecture visualization derived from your requirements.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button onClick={() => handleGenerate('architecture')} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-700">
-                <RefreshCw size={14} /> Regenerate
+              <button disabled={generatingKind !== null} onClick={() => handleGenerate('architecture')} className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-700 disabled:cursor-wait disabled:opacity-60">
+                <RefreshCw size={14} className={generatingKind === 'architecture' ? 'animate-spin' : ''} /> {generatingKind === 'architecture' ? 'Generating…' : 'Regenerate'}
               </button>
               <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-alt px-3 py-2 text-xs font-semibold text-ink-soft">
                 <History size={14} /> v{latestArtifacts.architecture?.version || 0}
@@ -305,6 +370,7 @@ export default function BRDStudio() {
             <ArchitectureWorkspace
               artifact={latestArtifacts.architecture}
               onExport={(format) => handleExportArtifact('architecture', format)}
+              isExporting={Boolean(exportingArtifact?.startsWith('architecture-'))}
             />
           </div>
         </section>
@@ -324,17 +390,17 @@ export default function BRDStudio() {
                       <button
                         key={format}
                         onClick={() => handleExportArtifact(kind, format)}
-                        disabled={!latestArtifacts[kind]}
+                        disabled={!latestArtifacts[kind] || exportingArtifact !== null}
                         className="rounded border border-border px-3 py-2 text-xs font-semibold disabled:opacity-40 hover:bg-surface-alt transition"
                         title={`Export ${kind} as ${format.toUpperCase()}`}
                       >
-                        {format === 'drawio' ? '✎ draw.io' : format === 'png' ? '📸 PNG' : format === 'pdf' ? '📄 PDF' : '📝 DOCX'}
+                        {exportingArtifact === `${kind}-${format}` ? 'Preparing…' : format === 'drawio' ? 'draw.io' : format.toUpperCase()}
                       </button>
                     ))}
                   </div>
                   <div className="mt-2 p-2 rounded bg-slate-50 border border-slate-200">
                     <p className="text-[10px] text-slate-600">
-                      <span className="font-semibold">Visio:</span> Coming soon
+                      <span className="font-semibold">Visio:</span> not generated by the current stack. Use the editable draw.io export for Visio interoperability.
                     </p>
                   </div>
                 </div>
@@ -363,8 +429,10 @@ export default function BRDStudio() {
         <div className="space-y-5">
           <form onSubmit={handleUpload} className="bg-surface border border-border rounded-xl p-5 space-y-4">
             <h2 className="text-sm font-bold text-ink flex items-center gap-2"><Upload size={16} className="text-cyan-600" /> Upload BRD</h2>
-            <input type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} className="block w-full text-xs text-ink-soft file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-50 file:px-3 file:py-2 file:text-xs file:font-bold file:text-cyan-700" />
-            <button disabled={!selectedFile || !projectId} className="w-full rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">Upload</button>
+            <input key={fileInputKey} type="file" accept=".pdf,.docx,.txt,.md" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} className="block w-full text-xs text-ink-soft file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-50 file:px-3 file:py-2 file:text-xs file:font-bold file:text-cyan-700" />
+            {selectedFile && <div className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2"><p className="truncate text-xs font-bold text-cyan-900">{selectedFile.name}</p><p className="mt-0.5 text-[10px] text-cyan-700">{(selectedFile.size / 1024).toFixed(1)} KB · ready to upload</p></div>}
+            <p className="text-[10px] leading-relaxed text-ink-faint">PDF, DOCX, TXT, or Markdown · maximum 10 MB. Scanned PDFs require searchable text.</p>
+            <button disabled={!selectedFile || !projectId || isUploading} className="w-full rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">{isUploading ? 'Uploading…' : 'Upload'}</button>
           </form>
 
           <form onSubmit={handleSaveRequirements} className="bg-surface border border-border rounded-xl p-5 space-y-4">
@@ -372,7 +440,7 @@ export default function BRDStudio() {
             <textarea value={overview} onChange={(event) => setOverview(event.target.value)} rows={3} placeholder="Overview" className="w-full resize-none rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm outline-none focus:border-blue-600" />
             <textarea value={functionalText} onChange={(event) => setFunctionalText(event.target.value)} rows={5} placeholder="Functional requirements, one per line" className="w-full resize-none rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm outline-none focus:border-blue-600" />
             <button disabled={!latestDocument} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300">Save Version</button>
-            <button type="button" disabled={!latestDocument} onClick={() => handleGenerate('requirements')} className="w-full rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400">Generate Requirements</button>
+            <button type="button" disabled={!latestDocument || generatingKind !== null} onClick={() => handleGenerate('requirements')} className="w-full rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400">{generatingKind === 'requirements' ? 'Generating…' : 'Generate Requirements'}</button>
           </form>
 
         </div>
@@ -428,7 +496,7 @@ export default function BRDStudio() {
                     <Icon size={18} className="text-violet-600 mb-3" />
                     <p className="text-sm font-bold text-ink">{artifact.title}</p>
                     <p className="mt-1 text-xs text-ink-faint">{meta.label} / Version {artifact.version}</p>
-                    <p className="mt-3 text-xs text-ink-soft line-clamp-3">{String(artifact.payload.notes || 'Payload saved in MySQL metadata.')}</p>
+                    <p className="mt-3 text-xs text-ink-soft">Generated with {artifact.ai_provider || 'Gemini'}{artifact.model_used ? ` · ${artifact.model_used}` : ''}</p>
                   </article>
                 );
               })}

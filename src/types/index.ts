@@ -316,3 +316,80 @@ export interface BRDArtifact {
   created_by_id?: string | null;
   created_at: string;
 }
+
+export interface BusinessFlowNode {
+  id: string;
+  label: string;
+  type?: string;
+  description?: string;
+  actor?: string;
+  system?: string;
+  inputs?: string[];
+  outputs?: string[];
+  business_rule?: string;
+  status?: string;
+}
+
+export interface BusinessFlowEdge {
+  source: string;
+  target: string;
+  label?: string;
+  kind?: string;
+  type?: string;
+}
+
+export interface BusinessFlowPayload {
+  nodes?: BusinessFlowNode[];
+  edges?: BusinessFlowEdge[];
+  swimlanes?: Array<{ name: string; actor?: string; description?: string }>;
+  outcome?: string;
+  notes?: string;
+}
+
+export interface ArchitectureComponent {
+  name: string;
+  type?: string;
+  responsibility?: string;
+  technology?: string;
+  description?: string;
+}
+
+export interface ArchitectureLayer {
+  name: string;
+  purpose?: string;
+  description?: string;
+  securityBoundary?: string;
+  components?: Array<ArchitectureComponent | string>;
+}
+
+export interface ArchitectureRelationship {
+  source?: string;
+  target?: string;
+  from?: string;
+  to?: string;
+  label?: string;
+  type?: string;
+  protocol?: string;
+}
+
+export interface ArchitecturePayload {
+  title?: string;
+  subtitle?: string;
+  objective?: string;
+  summary?: string;
+  layers?: ArchitectureLayer[];
+  external_systems?: Array<ArchitectureComponent | string>;
+  relationships?: ArchitectureRelationship[];
+  connections?: ArchitectureRelationship[];
+  cross_cutting_concerns?: Record<string, string | string[]>;
+  security?: string[];
+  deployment?: string[];
+  decisions?: Array<string | { decision?: string; rationale?: string; trade_offs?: string }>;
+  technology_stack?: Record<string, string[]>;
+  nfr_alignment?: Record<string, string>;
+  assumptions?: string[];
+  risks?: Array<string | { description?: string; impact?: string; mitigation?: string }>;
+  trade_offs?: string[];
+  so_what?: string;
+  notes?: string;
+}
