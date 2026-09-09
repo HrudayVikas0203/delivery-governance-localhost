@@ -347,6 +347,8 @@ export interface BusinessFlowNode {
   inputs?: string[];
   outputs?: string[];
   business_rule?: string;
+  condition?: string;
+  exception_handling?: string;
   status?: string;
 }
 
@@ -356,17 +358,22 @@ export interface BusinessFlowEdge {
   label?: string;
   kind?: string;
   type?: string;
+  from?: string;
+  to?: string;
 }
 
 export interface BusinessFlowPayload {
   nodes?: BusinessFlowNode[];
+  steps?: BusinessFlowNode[];
   edges?: BusinessFlowEdge[];
+  transitions?: BusinessFlowEdge[];
   swimlanes?: Array<{ name: string; actor?: string; description?: string }>;
   outcome?: string;
   notes?: string;
 }
 
 export interface ArchitectureComponent {
+  id?: string;
   name: string;
   type?: string;
   responsibility?: string;
@@ -399,6 +406,7 @@ export interface ArchitecturePayload {
   summary?: string;
   layers?: ArchitectureLayer[];
   external_systems?: Array<ArchitectureComponent | string>;
+  externalSystems?: Array<ArchitectureComponent | string>;
   relationships?: ArchitectureRelationship[];
   connections?: ArchitectureRelationship[];
   cross_cutting_concerns?: Record<string, string | string[]>;

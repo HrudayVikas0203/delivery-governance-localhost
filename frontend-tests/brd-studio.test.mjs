@@ -21,6 +21,10 @@ test('business flow uses valid SVG paint and directional connectors', () => {
   assert.match(flow, /business_rule/);
   assert.match(flow, /inputs/);
   assert.match(flow, /outputs/);
+  assert.match(flow, /measuredHeight/);
+  assert.match(flow, /payload\.steps/);
+  assert.match(flow, /payload\.transitions/);
+  assert.match(flow, /exceptionMarkerId/);
 });
 
 test('architecture renders component relationships from both supported payload keys', () => {
@@ -29,6 +33,19 @@ test('architecture renders component relationships from both supported payload k
   assert.match(architecture, /markerEnd=/);
   assert.match(architecture, /external_systems/);
   assert.match(architecture, /cross_cutting_concerns/);
+  assert.match(architecture, /nfr_alignment/);
+  assert.match(architecture, /payload\.assumptions/);
+  assert.match(architecture, /payload\.trade_offs/);
+  assert.match(architecture, /component\.id/);
+  assert.match(architecture, /bandHeight/);
+  assert.match(architecture, /External systems/);
+});
+
+test('architecture omits unavailable supporting sections and does not fabricate objectives', () => {
+  assert.match(architecture, /Architecture objective not specified/);
+  assert.match(architecture, /nfrs\.length > 0/);
+  assert.match(architecture, /assumptions\.length > 0/);
+  assert.doesNotMatch(architecture, /Layered architecture generated from the selected project/);
 });
 
 test('upload control exposes supported formats and a real loading state', () => {

@@ -1,13 +1,13 @@
 import { AlertCircle, CircleDot, GitBranch, UserRound } from 'lucide-react';
 import type { BRDArtifact, BusinessFlowEdge, BusinessFlowNode, BusinessFlowPayload } from '../types';
 
-const NODE_WIDTH = 286;
-const NODE_HEIGHT = 190;
+const NODE_WIDTH = 300;
+const MIN_NODE_HEIGHT = 184;
 const COLUMN_GAP = 96;
 const ROW_GAP = 62;
 const CANVAS_PADDING = 52;
 
-type NodePosition = { x: number; y: number; rank: number };
+type NodePosition = { x: number; y: number; rank: number; height: number };
 
 const palettes = {
   start: { fill: '#ecfdf5', border: '#10b981', accent: '#047857', badge: '#d1fae5' },
@@ -17,6 +17,8 @@ const palettes = {
   output: { fill: '#f0fdfa', border: '#14b8a6', accent: '#0f766e', badge: '#ccfbf1' },
   exception: { fill: '#fff1f2', border: '#f43f5e', accent: '#be123c', badge: '#ffe4e6' },
   process: { fill: '#eff6ff', border: '#3b82f6', accent: '#1d4ed8', badge: '#dbeafe' },
+  system: { fill: '#faf5ff', border: '#a855f7', accent: '#7e22ce', badge: '#f3e8ff' },
+  subprocess: { fill: '#f5f3ff', border: '#7c3aed', accent: '#5b21b6', badge: '#ede9fe' },
 };
 
 function text(value: unknown): string {
@@ -24,13 +26,42 @@ function text(value: unknown): string {
 }
 
 function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(text).filter(Boolean) : [];
+  return Array.isArray(value) ? value.map(text).filter(Boolean) : text(value) ? [text(value)] : [];
+}
+
+function normalizeNode(value: unknown, index: number): BusinessFlowNode | null {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as Record<string, unknown>;
+  const id = text(item.id || item.key) || `step-${index + 1}`;
+  const label = text(item.label || item.name || item.step);
+  if (!label) return null;
+  return { id, label, type: text(item.type || item.kind), description: text(item.description), actor: text(item.actor || item.role), system: text(item.system), inputs: stringList(item.inputs || item.input), outputs: stringList(item.outputs || item.output), business_rule: text(item.business_rule || item.rule), condition: text(item.condition), exception_handling: text(item.exception_handling || item.exception), status: text(item.status) };
+}
+
+function normalizeEdge(value: unknown): BusinessFlowEdge | null {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as Record<string, unknown>;
+  const source = text(item.source || item.from || item.source_id);
+  const target = text(item.target || item.to || item.target_id);
+  return source && target ? { source, target, label: text(item.label || item.condition), kind: text(item.kind), type: text(item.type) } : null;
+}
+
+function measuredHeight(node: BusinessFlowNode): number {
+  const titleLines = Math.ceil(text(node.label).length / 28);
+  const actorLines = Math.ceil(([text(node.actor), text(node.system)].filter(Boolean).join(' · ')).length / 40);
+  const descriptionLines = Math.ceil(text(node.description).length / 44);
+  const ruleLines = Math.ceil(text(node.business_rule || node.condition).length / 38);
+  const exceptionLines = Math.ceil(text(node.exception_handling).length / 38);
+  const ioLines = stringList(node.inputs).length || stringList(node.outputs).length ? 42 : 0;
+  return Math.max(MIN_NODE_HEIGHT, Math.min(330, 96 + titleLines * 18 + actorLines * 13 + descriptionLines * 14 + ruleLines * 13 + exceptionLines * 13 + ioLines));
 }
 
 function nodeType(node: BusinessFlowNode, incoming: number, outgoing: number): keyof typeof palettes {
   const raw = text(node.type).toLowerCase();
   if (raw === 'decision' || raw === 'gateway' || node.label.includes('?')) return 'decision';
   if (raw in palettes) return raw as keyof typeof palettes;
+  if (/system|service|automation/.test(raw)) return 'system';
+  if (/sub.?process/.test(raw)) return 'subprocess';
   if (incoming === 0) return 'start';
   if (outgoing === 0) return 'end';
   return 'process';
@@ -72,18 +103,22 @@ function buildLayout(nodes: BusinessFlowNode[], edges: BusinessFlowEdge[]) {
     groups.set(rank, [...(groups.get(rank) || []), node]);
   });
 
-  const maxRows = Math.max(...Array.from(groups.values(), (group) => group.length), 1);
-  const contentHeight = maxRows * NODE_HEIGHT + (maxRows - 1) * ROW_GAP;
+  const groupHeights = Array.from(groups.values(), (group) => group.reduce((sum, node) => sum + measuredHeight(node), 0) + Math.max(0, group.length - 1) * ROW_GAP);
+  const contentHeight = Math.max(...groupHeights, MIN_NODE_HEIGHT);
   const positions = new Map<string, NodePosition>();
   groups.forEach((group, rank) => {
-    const groupHeight = group.length * NODE_HEIGHT + (group.length - 1) * ROW_GAP;
+    const groupHeight = group.reduce((sum, node) => sum + measuredHeight(node), 0) + Math.max(0, group.length - 1) * ROW_GAP;
     const offset = (contentHeight - groupHeight) / 2;
-    group.forEach((node, row) => {
+    let cursor = CANVAS_PADDING + 54 + offset;
+    group.forEach((node) => {
+      const height = measuredHeight(node);
       positions.set(node.id, {
         x: CANVAS_PADDING + rank * (NODE_WIDTH + COLUMN_GAP),
-        y: CANVAS_PADDING + 54 + offset + row * (NODE_HEIGHT + ROW_GAP),
+        y: cursor,
         rank,
+        height,
       });
+      cursor += height + ROW_GAP;
     });
   });
 
@@ -99,14 +134,14 @@ function buildLayout(nodes: BusinessFlowNode[], edges: BusinessFlowEdge[]) {
 
 function connectorPath(source: NodePosition, target: NodePosition): string {
   const x1 = source.x + NODE_WIDTH;
-  const y1 = source.y + NODE_HEIGHT / 2;
+  const y1 = source.y + source.height / 2;
   const x2 = target.x;
-  const y2 = target.y + NODE_HEIGHT / 2;
+  const y2 = target.y + target.height / 2;
   if (target.rank > source.rank) {
     const bend = x1 + Math.max(38, (x2 - x1) / 2);
     return `M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`;
   }
-  const bottom = Math.max(source.y, target.y) + NODE_HEIGHT + 34;
+  const bottom = Math.max(source.y + source.height, target.y + target.height) + 34;
   return `M ${x1} ${y1} C ${x1 + 42} ${y1}, ${x1 + 42} ${bottom}, ${x2 - 42} ${bottom} S ${x2 - 42} ${y2}, ${x2} ${y2}`;
 }
 
@@ -115,8 +150,9 @@ function NodeCard({ node, kind }: { node: BusinessFlowNode; kind: keyof typeof p
   const inputs = stringList(node.inputs);
   const outputs = stringList(node.outputs);
   const description = text(node.description);
-  const actor = text(node.actor || node.system);
-  const rule = text(node.business_rule);
+  const actor = [text(node.actor), text(node.system)].filter((value, index, values) => value && values.indexOf(value) === index).join(' · ');
+  const rule = text(node.business_rule || node.condition);
+  const exception = text(node.exception_handling);
   const status = text(node.status);
 
   return (
@@ -125,7 +161,7 @@ function NodeCard({ node, kind }: { node: BusinessFlowNode; kind: keyof typeof p
         height: '100%', boxSizing: 'border-box', border: kind === 'decision' ? 'none' : `2px solid ${palette.border}`,
         borderRadius: kind === 'start' || kind === 'end' ? 28 : 14, background: kind === 'decision' ? 'transparent' : palette.fill,
         boxShadow: kind === 'decision' ? 'none' : '0 8px 20px rgba(15, 23, 42, 0.08)', padding: kind === 'decision' ? '30px 58px' : '14px 16px', color: '#0f172a',
-        overflow: 'hidden', fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+        fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -136,6 +172,7 @@ function NodeCard({ node, kind }: { node: BusinessFlowNode; kind: keyof typeof p
       {actor && <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 6, color: '#475569', fontSize: 10, fontWeight: 700 }}><UserRound size={12} /> {actor}</div>}
       {description && <div style={{ marginTop: 7, color: '#475569', fontSize: 10.5, lineHeight: 1.35 }}>{description}</div>}
       {rule && <div style={{ marginTop: 7, borderLeft: `3px solid ${palette.border}`, paddingLeft: 7, color: palette.accent, fontSize: 10, lineHeight: 1.3 }}><strong>Rule:</strong> {rule}</div>}
+      {exception && <div style={{ marginTop: 7, borderLeft: '3px solid #f43f5e', paddingLeft: 7, color: '#be123c', fontSize: 10, lineHeight: 1.3 }}><strong>Exception:</strong> {exception}</div>}
       {(inputs.length > 0 || outputs.length > 0) && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8, borderTop: '1px solid rgba(100,116,139,.2)', paddingTop: 7 }}>
           <div><div style={{ color: '#64748b', fontSize: 8, fontWeight: 800, textTransform: 'uppercase' }}>Input</div><div style={{ color: '#334155', fontSize: 9.5, lineHeight: 1.25 }}>{inputs.slice(0, 2).join(', ') || '—'}</div></div>
@@ -154,9 +191,11 @@ export default function BusinessFlowWorkspace({ artifact }: BusinessFlowWorkspac
   }
 
   const payload = (artifact.payload && typeof artifact.payload === 'object' ? artifact.payload : {}) as BusinessFlowPayload;
-  const nodes = (Array.isArray(payload.nodes) ? payload.nodes : []).filter((node): node is BusinessFlowNode => Boolean(node && typeof node === 'object' && text(node.id) && text(node.label)));
+  const nodeSource = payload.nodes || payload.steps;
+  const nodes = (Array.isArray(nodeSource) ? nodeSource : []).map(normalizeNode).filter((node): node is BusinessFlowNode => Boolean(node));
   const nodeIds = new Set(nodes.map((node) => node.id));
-  const edges = (Array.isArray(payload.edges) ? payload.edges : []).filter((edge): edge is BusinessFlowEdge => Boolean(edge && typeof edge === 'object' && nodeIds.has(text(edge.source)) && nodeIds.has(text(edge.target))));
+  const edgeSource = payload.edges || payload.transitions;
+  const edges = (Array.isArray(edgeSource) ? edgeSource : []).map(normalizeEdge).filter((edge): edge is BusinessFlowEdge => Boolean(edge && nodeIds.has(edge.source) && nodeIds.has(edge.target)));
   const swimlanes = (Array.isArray(payload.swimlanes) ? payload.swimlanes : []).filter((lane) => lane && text(lane.name));
 
   if (nodes.length === 0) {
@@ -166,6 +205,7 @@ export default function BusinessFlowWorkspace({ artifact }: BusinessFlowWorkspac
   const layout = buildLayout(nodes, edges);
   const safeId = artifact.id.replace(/[^a-zA-Z0-9]/g, '');
   const markerId = `business-arrow-${safeId}`;
+  const exceptionMarkerId = `business-error-arrow-${safeId}`;
   const patternId = `flow-grid-${safeId}`;
 
   return (
@@ -177,20 +217,21 @@ export default function BusinessFlowWorkspace({ artifact }: BusinessFlowWorkspac
 
       <div className="overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 shadow-inner">
         <svg width={Math.max(layout.width, 760)} height={Math.max(layout.height, 430)} role="img" aria-label="Business process diagram">
-          <defs><pattern id={patternId} width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="#e2e8f0" strokeWidth="1" /></pattern><marker id={markerId} markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" /></marker></defs>
+          <defs><pattern id={patternId} width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="#e2e8f0" strokeWidth="1" /></pattern><marker id={markerId} markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" /></marker><marker id={exceptionMarkerId} markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 10 5 L 0 10 z" fill="#e11d48" /></marker></defs>
           <rect width="100%" height="100%" fill={`url(#${patternId})`} />
           <text x={CANVAS_PADDING} y={36} fill="#64748b" fontSize="11" fontWeight="700" letterSpacing="1.4">ENTRY → ACTIVITIES → DECISIONS → OUTCOME</text>
           {edges.map((edge, index) => {
             const source = layout.positions.get(edge.source); const target = layout.positions.get(edge.target);
             if (!source || !target) return null;
-            const label = text(edge.label); const labelX = (source.x + NODE_WIDTH + target.x) / 2; const labelY = (source.y + target.y) / 2 + NODE_HEIGHT / 2 - 8;
-            const exception = text(edge.kind || edge.type).toLowerCase().includes('exception');
-            return <g key={`${edge.source}-${edge.target}-${index}`}><path d={connectorPath(source, target)} fill="none" stroke={exception ? '#e11d48' : '#64748b'} strokeWidth="2.25" strokeDasharray={exception ? '7 5' : undefined} markerEnd={`url(#${markerId})`} />{label && <g><rect x={labelX - Math.min(74, label.length * 3.2)} y={labelY - 13} width={Math.min(148, Math.max(54, label.length * 6.4))} height="22" rx="11" fill="white" stroke="#cbd5e1" /><text x={labelX} y={labelY + 2} textAnchor="middle" fill="#475569" fontSize="10" fontWeight="700">{label.slice(0, 24)}</text></g>}</g>;
+            const label = text(edge.label); const labelX = (source.x + NODE_WIDTH + target.x) / 2; const labelY = (source.y + source.height / 2 + target.y + target.height / 2) / 2 - 8;
+            const edgeSemantics = `${edge.kind || ''} ${edge.type || ''} ${edge.label || ''}`.toLowerCase();
+            const exception = /exception|error|failure|reject|invalid|no\b/.test(edgeSemantics);
+            return <g key={`${edge.source}-${edge.target}-${index}`}><path d={connectorPath(source, target)} fill="none" stroke={exception ? '#e11d48' : '#64748b'} strokeWidth="2.25" strokeDasharray={exception ? '7 5' : undefined} markerEnd={`url(#${exception ? exceptionMarkerId : markerId})`} />{label && <g><rect x={labelX - Math.min(74, label.length * 3.2)} y={labelY - 13} width={Math.min(148, Math.max(54, label.length * 6.4))} height="22" rx="11" fill="white" stroke={exception ? '#fecdd3' : '#cbd5e1'} /><text x={labelX} y={labelY + 2} textAnchor="middle" fill={exception ? '#be123c' : '#475569'} fontSize="10" fontWeight="700">{label.slice(0, 24)}</text></g>}</g>;
           })}
           {nodes.map((node) => {
             const position = layout.positions.get(node.id)!;
             const kind = nodeType(node, layout.incoming.get(node.id) || 0, layout.outgoing.get(node.id)?.length || 0);
-            return <g key={node.id}>{kind === 'decision' && <polygon points={`${position.x + NODE_WIDTH / 2},${position.y} ${position.x + NODE_WIDTH},${position.y + NODE_HEIGHT / 2} ${position.x + NODE_WIDTH / 2},${position.y + NODE_HEIGHT} ${position.x},${position.y + NODE_HEIGHT / 2}`} fill={palettes.decision.fill} stroke={palettes.decision.border} strokeWidth="2.5" />}<foreignObject x={position.x} y={position.y} width={NODE_WIDTH} height={NODE_HEIGHT}><NodeCard node={node} kind={kind} /></foreignObject></g>;
+            return <g key={node.id}>{kind === 'decision' && <polygon points={`${position.x + NODE_WIDTH / 2},${position.y} ${position.x + NODE_WIDTH},${position.y + position.height / 2} ${position.x + NODE_WIDTH / 2},${position.y + position.height} ${position.x},${position.y + position.height / 2}`} fill={palettes.decision.fill} stroke={palettes.decision.border} strokeWidth="2.5" />}<foreignObject x={position.x} y={position.y} width={NODE_WIDTH} height={position.height}><NodeCard node={node} kind={kind} /></foreignObject></g>;
           })}
         </svg>
       </div>
