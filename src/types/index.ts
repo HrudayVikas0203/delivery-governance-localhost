@@ -209,6 +209,17 @@ export interface NotificationItem {
   isRead: boolean;
 }
 
+export interface TaskNotification {
+  id: string;
+  recipient_id: string;
+  task_id?: string | null;
+  notification_type: 'info' | 'success' | 'alert' | 'comment' | string;
+  title: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+}
+
 export interface AppSettings {
   emailAlerts: boolean;
   slackAlerts: boolean;
@@ -249,7 +260,6 @@ export interface DeliveryTask {
   priority: TaskPriority;
   assignee_id?: string | null;
   assignee_name?: string | null;
-  assignee_ids?: string[];
   reporter_id?: string | null;
   reporter_name?: string | null;
   start_date?: string | null;
@@ -265,6 +275,16 @@ export interface DeliveryTask {
   approved_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskStatusHistory {
+  id: string;
+  task_id: string;
+  previous_status: TaskStatus;
+  new_status: TaskStatus;
+  changed_by_id?: string | null;
+  changed_by_name?: string | null;
+  changed_at: string;
 }
 
 export interface TaskComment {

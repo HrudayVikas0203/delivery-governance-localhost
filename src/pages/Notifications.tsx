@@ -1,142 +1,60 @@
-import { Bell, CheckCheck, Trash2, Calendar, FileText, ShieldAlert, BadgeAlert } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { BadgeAlert, Bell, Calendar, CheckCheck, FileText, ShieldAlert, Trash2 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { apiClearNotifications, apiListNotifications, apiMarkAllNotificationsRead, apiSetNotificationRead } from '../services/api';
 import { useStore } from '../store/useStore';
-
-interface NotificationItem {
-  id: string;
-  type: 'info' | 'success' | 'alert' | 'comment';
-  title: string;
-  message: string;
-  time: string;
-  isRead: boolean;
-}
+import type { TaskNotification } from '../types';
 
 export default function Notifications() {
-  const {
-    notifications,
-    toggleNotificationRead,
-    markAllNotificationsRead,
-    clearAllNotifications
-  } = useStore();
+  const { authToken } = useStore();
+  const navigate = useNavigate();
+  const [notifications, setNotifications] = useState<TaskNotification[]>([]);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
-  const handleMarkAllRead = () => {
-    markAllNotificationsRead();
-  };
+  useEffect(() => {
+    if (!authToken) return;
+    apiListNotifications(authToken).then(setNotifications).catch((error) => setFeedback(error instanceof Error ? error.message : 'Unable to load notifications.'));
+  }, [authToken]);
 
-  const handleClearAll = () => {
-    clearAllNotifications();
-  };
-
-  const handleToggleRead = (id: string) => {
-    toggleNotificationRead(id);
-  };
-
-  const getNotifIcon = (type: NotificationItem['type']) => {
-    switch (type) {
-      case 'success':
-        return <CheckCheck className="text-success" size={16} />;
-      case 'alert':
-        return <BadgeAlert className="text-warning" size={16} />;
-      case 'comment':
-        return <ShieldAlert className="text-danger" size={16} />;
-      default:
-        return <FileText className="text-blue-500" size={16} />;
+  const handleToggleRead = async (notification: TaskNotification) => {
+    if (!authToken) return;
+    try {
+      const updated = await apiSetNotificationRead(notification.id, !notification.is_read, authToken);
+      setNotifications((current) => current.map((item) => item.id === updated.id ? updated : item));
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'Unable to update notification.');
     }
   };
 
-  const getNotifBg = (type: NotificationItem['type']) => {
-    switch (type) {
-      case 'success':
-        return 'bg-success-bg border-success/10';
-      case 'alert':
-        return 'bg-warning-bg border-warning/10';
-      case 'comment':
-        return 'bg-danger-bg border-danger/10';
-      default:
-        return 'bg-blue-50 border-blue-100/55';
-    }
+  const handleMarkAllRead = async () => {
+    if (!authToken) return;
+    await apiMarkAllNotificationsRead(authToken);
+    setNotifications((current) => current.map((item) => ({ ...item, is_read: true })));
   };
 
-  const unreadCount = notifications.filter(n => !n.isRead).length;
+  const handleClearAll = async () => {
+    if (!authToken) return;
+    await apiClearNotifications(authToken);
+    setNotifications([]);
+  };
+
+  const icon = (type: string) => type === 'success' ? <CheckCheck className="text-success" size={16} /> : type === 'alert' ? <BadgeAlert className="text-warning" size={16} /> : type === 'comment' ? <ShieldAlert className="text-danger" size={16} /> : <FileText className="text-blue-500" size={16} />;
+  const unreadCount = notifications.filter((item) => !item.is_read).length;
 
   return (
-    <div className="space-y-6 max-w-3xl mx-auto">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-border pb-4">
-        <div>
-          <h1 className="text-2xl font-display font-bold text-ink flex items-center gap-2">
-            <Bell size={24} className="text-blue-600" />
-            Notifications Center
-            {unreadCount > 0 && (
-              <span className="bg-danger text-white text-xs font-mono font-bold px-2 py-0.5 rounded-full">
-                {unreadCount} new
-              </span>
-            )}
-          </h1>
-          <p className="text-ink-soft text-sm mt-1">Stay updated with reviews, deliverables alerts, and project status shifts.</p>
-        </div>
-
-        <div className="flex gap-2">
-          {notifications.length > 0 && (
-            <>
-              <button 
-                onClick={handleMarkAllRead}
-                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100 transition-colors cursor-pointer"
-              >
-                Mark all read
-              </button>
-              <button 
-                onClick={handleClearAll}
-                className="flex items-center gap-1 text-xs font-semibold text-ink-soft hover:text-ink bg-surface-sunken px-3 py-1.5 rounded-lg border border-border transition-colors cursor-pointer"
-              >
-                <Trash2 size={12} /> Clear all
-              </button>
-            </>
-          )}
-        </div>
+    <div className="mx-auto max-w-3xl space-y-6">
+      <div className="flex flex-col gap-4 border-b border-border pb-4 sm:flex-row sm:items-center sm:justify-between">
+        <div><h1 className="flex items-center gap-2 text-2xl font-bold text-ink"><Bell size={24} className="text-blue-600" />Notifications Center{unreadCount > 0 && <span className="rounded-full bg-danger px-2 py-0.5 text-xs text-white">{unreadCount} new</span>}</h1><p className="mt-1 text-sm text-ink-soft">Persistent task assignments and workflow updates for your login.</p></div>
+        {notifications.length > 0 && <div className="flex gap-2"><button onClick={() => void handleMarkAllRead()} className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-600">Mark all read</button><button onClick={() => void handleClearAll()} className="flex items-center gap-1 rounded-lg border border-border bg-surface-alt px-3 py-1.5 text-xs font-semibold text-ink-soft"><Trash2 size={12} /> Clear all</button></div>}
       </div>
-
-      {/* Notifications List */}
+      {feedback && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{feedback}</div>}
       <div className="space-y-3">
-        {notifications.length === 0 ? (
-          <div className="text-center py-20 bg-surface border border-dashed border-border rounded-xl text-ink-faint text-sm flex flex-col items-center justify-center gap-3">
-            <Bell size={36} className="text-border" />
-            <p>You are all caught up! No notifications to display.</p>
+        {notifications.length === 0 ? <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface py-20 text-sm text-ink-faint"><Bell size={36} className="text-border" /><p>You are all caught up.</p></div> : notifications.map((notification) => (
+          <div key={notification.id} className={`flex items-start justify-between gap-4 rounded-xl border bg-surface p-4 shadow-sm ${notification.is_read ? 'border-border opacity-75' : 'border-l-4 border-l-blue-600'}`}>
+            <button className="flex flex-1 gap-3 text-left" onClick={() => notification.task_id && navigate('/tasks')}><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-alt">{icon(notification.notification_type)}</span><span><strong className="block text-sm text-ink">{notification.title}</strong><span className="mt-1 block text-xs leading-relaxed text-ink-soft">{notification.message}</span><span className="mt-1 flex items-center gap-1 font-mono text-[10px] text-ink-faint"><Calendar size={10} />{new Date(notification.created_at).toLocaleString()}</span></span></button>
+            <button onClick={() => void handleToggleRead(notification)} className="rounded border border-border px-2 py-0.5 text-[10px] font-bold text-blue-600">{notification.is_read ? 'Mark unread' : 'Dismiss'}</button>
           </div>
-        ) : (
-          notifications.map(n => (
-            <div 
-              key={n.id} 
-              className={`p-4 border rounded-xl shadow-sm transition-all flex items-start justify-between gap-4 bg-surface ${
-                !n.isRead ? 'border-l-4 border-l-blue-600 shadow-sm' : 'border-border opacity-75'
-              }`}
-            >
-              <div className="flex gap-3">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center border shrink-0 ${getNotifBg(n.type)}`}>
-                  {getNotifIcon(n.type)}
-                </div>
-                <div className="space-y-1">
-                  <h4 className={`text-sm font-semibold ${!n.isRead ? 'text-ink' : 'text-ink-soft'}`}>{n.title}</h4>
-                  <p className="text-xs text-ink-soft leading-relaxed">{n.message}</p>
-                  <p className="text-[10px] text-ink-faint flex items-center gap-1 font-mono">
-                    <Calendar size={10} />
-                    {n.time}
-                  </p>
-                </div>
-              </div>
-
-              <button 
-                onClick={() => handleToggleRead(n.id)}
-                className={`text-[10px] font-bold px-2 py-0.5 rounded border transition-colors cursor-pointer ${
-                  !n.isRead 
-                    ? 'bg-blue-50 text-blue-600 border-blue-100 hover:bg-blue-100' 
-                    : 'bg-slate-100 text-slate-400 border-slate-200 hover:bg-slate-200'
-                }`}
-              >
-                {n.isRead ? 'Mark Unread' : 'Dismiss'}
-              </button>
-            </div>
-          ))
-        )}
+        ))}
       </div>
     </div>
   );

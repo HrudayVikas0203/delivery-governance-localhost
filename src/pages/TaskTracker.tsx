@@ -31,14 +31,13 @@ import {
   apiListEligibleTaskAssignees,
   apiListScheduledEmails,
   apiListTaskComments,
+  apiListTaskHistory,
   apiListTasks,
   apiScheduleEmail,
   apiRetryScheduledEmail,
-  apiSubmitTaskForReview,
-  apiTaskApproval,
   apiUpdateTaskStatus,
 } from '../services/api';
-import type { DeliveryTask, TaskComment, TaskPriority, TaskStatus, TaskType } from '../types';
+import type { DeliveryTask, TaskComment, TaskPriority, TaskStatus, TaskStatusHistory, TaskType } from '../types';
 
 type TaskView = 'dashboard' | 'table' | 'kanban' | 'emails' | 'reports';
 
@@ -78,13 +77,28 @@ const tabMeta: Array<{ key: TaskView; label: string; icon: typeof LayoutDashboar
   { key: 'reports', label: 'Reports', icon: Download },
 ];
 
-function taskNumber(tasks: DeliveryTask[], taskId: string) {
-  const index = tasks.findIndex((task) => task.id === taskId);
-  return `T-${String(index + 1).padStart(3, '0')}`;
+function allowedDestinations(task: DeliveryTask, canManage: boolean, currentUserId?: string): TaskStatus[] {
+  if (canManage) {
+    const transitions: Partial<Record<TaskStatus, TaskStatus[]>> = {
+      todo: ['in_progress', 'blocked'],
+      in_progress: ['review', 'blocked'],
+      review: ['blocked', 'done'],
+      blocked: ['done'],
+    };
+    return transitions[task.status] || [];
+  }
+  if (task.assignee_id !== currentUserId) return [];
+  if (task.status === 'todo') return ['in_progress'];
+  if (task.status === 'in_progress') return ['review'];
+  return [];
+}
+
+function taskNumber(_tasks: DeliveryTask[], taskId: string) {
+  return `TASK-${taskId.slice(0, 8).toUpperCase()}`;
 }
 
 export default function TaskTracker() {
-  const { authToken, currentUser, accounts, projects, employees, allocations, previewRole } = useStore();
+  const { authToken, currentUser, accounts, projects, employees, previewRole } = useStore();
   const [tasks, setTasks] = useState<DeliveryTask[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState('');
@@ -102,6 +116,7 @@ export default function TaskTracker() {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<DeliveryTask | null>(null);
   const [comments, setComments] = useState<TaskComment[]>([]);
+  const [statusHistory, setStatusHistory] = useState<TaskStatusHistory[]>([]);
   const [commentBody, setCommentBody] = useState('');
   const [form, setForm] = useState({
     accountId: '',
@@ -109,9 +124,7 @@ export default function TaskTracker() {
     description: '',
     projectId: '',
     assigneeId: '',
-    extraAssigneeIds: [] as string[],
     priority: 'medium' as TaskPriority,
-    status: 'todo' as TaskStatus,
     taskType: 'development' as TaskType,
     startDate: '',
     dueDate: '',
@@ -132,6 +145,7 @@ export default function TaskTracker() {
   const [loadingAssignees, setLoadingAssignees] = useState(false);
 
   const canManage = previewRole === 'manager' || previewRole === 'project_director' || previewRole === 'studio_head' || currentUser?.roleCategory === 'Architect';
+  const canGovernWorkflow = previewRole === 'manager' || previewRole === 'project_director' || previewRole === 'studio_head';
   const pageSize = 10;
   const selectedAccountProjects = useMemo(
     () => selectedAccountId ? projects.filter((project) => project.accountId === selectedAccountId) : projects,
@@ -149,13 +163,9 @@ export default function TaskTracker() {
           ? projects.filter((project) => project.accountId === selectedAccountId).map((project) => project.id)
           : projects.map((project) => project.id),
     );
-    const ids = new Set(
-      allocations
-        .filter((allocation) => scopedProjectIds.has(allocation.projectId) && allocation.projectStatus === 'Active')
-        .map((allocation) => allocation.employeeId),
-    );
+    const ids = new Set(tasks.filter((task) => scopedProjectIds.has(task.project_id)).map((task) => task.assignee_id).filter(Boolean));
     return employees.filter((employee) => ids.has(employee.id));
-  }, [allocations, employees, projects, selectedAccountId, selectedProjectId]);
+  }, [employees, projects, selectedAccountId, selectedProjectId, tasks]);
   const reporterOptions = useMemo(() => {
     const ids = new Set(tasks.map((task) => task.reporter_id).filter(Boolean));
     return employees.filter((employee) => ids.has(employee.id));
@@ -186,9 +196,15 @@ export default function TaskTracker() {
 
   useEffect(() => {
     if (!selectedTask || !authToken) return;
-    apiListTaskComments(selectedTask.id, authToken)
-      .then(setComments)
-      .catch(() => setComments([]));
+    Promise.all([apiListTaskComments(selectedTask.id, authToken), apiListTaskHistory(selectedTask.id, authToken)])
+      .then(([loadedComments, loadedHistory]) => {
+        setComments(loadedComments);
+        setStatusHistory(loadedHistory);
+      })
+      .catch(() => {
+        setComments([]);
+        setStatusHistory([]);
+      });
   }, [authToken, selectedTask]);
 
   useEffect(() => {
@@ -206,7 +222,6 @@ export default function TaskTracker() {
         ...current,
         projectId: '',
         assigneeId: '',
-        extraAssigneeIds: [],
       }));
     }
   }, [form.accountId, form.projectId, projects]);
@@ -227,10 +242,10 @@ export default function TaskTracker() {
   }, [authToken, form.projectId]);
 
   const visibleTasks = useMemo(() => {
-    let filtered = previewRole === 'employee' && currentUser ? tasks.filter((task) => task.assignee_id === currentUser.id || task.assignee_ids?.includes(currentUser.id)) : tasks;
+    let filtered = previewRole === 'employee' && currentUser ? tasks.filter((task) => task.assignee_id === currentUser.id) : tasks;
     if (statusFilter !== 'all') filtered = filtered.filter((task) => task.status === statusFilter);
     if (priorityFilter !== 'all') filtered = filtered.filter((task) => task.priority === priorityFilter);
-    if (assigneeFilter) filtered = filtered.filter((task) => task.assignee_id === assigneeFilter || task.assignee_ids?.includes(assigneeFilter));
+    if (assigneeFilter) filtered = filtered.filter((task) => task.assignee_id === assigneeFilter);
     if (taskTypeFilter !== 'all') filtered = filtered.filter((task) => task.task_type === taskTypeFilter);
     if (reporterFilter) filtered = filtered.filter((task) => task.reporter_id === reporterFilter);
     if (searchQuery.trim()) {
@@ -281,8 +296,8 @@ export default function TaskTracker() {
       setFeedback('Please select a project.');
       return;
     }
-    if (form.assigneeId && eligibleAssignees.length === 0) {
-      setFeedback('No developers are allocated to this project. Allocate a developer before creating an assigned task.');
+    if (!form.assigneeId) {
+      setFeedback('Select an eligible project member in Assigned To.');
       return;
     }
     try {
@@ -292,10 +307,8 @@ export default function TaskTracker() {
         title: form.title,
         description: form.description,
         task_type: form.taskType,
-        assignee_id: form.assigneeId || null,
-        assignee_ids: [form.assigneeId, ...form.extraAssigneeIds].filter(Boolean),
+        assignee_id: form.assigneeId,
         priority: form.priority,
-        status: form.status,
         start_date: form.startDate || null,
         due_date: form.dueDate || null,
         estimate_hours: Number(form.estimateHours) || 0,
@@ -304,7 +317,7 @@ export default function TaskTracker() {
         checklist: [],
       }, authToken);
       setTasks((current) => [created, ...current]);
-      setForm((current) => ({ ...current, title: '', description: '', assigneeId: '', extraAssigneeIds: [], priority: 'medium', status: 'todo', taskType: 'development', startDate: '', dueDate: '', estimateHours: 8, labels: 'Task' }));
+      setForm((current) => ({ ...current, title: '', description: '', assigneeId: '', priority: 'medium', taskType: 'development', startDate: '', dueDate: '', estimateHours: 8, labels: 'Task' }));
       setIsFormOpen(false);
       setFeedback('Task created.');
     } catch (error) {
@@ -347,16 +360,6 @@ export default function TaskTracker() {
     await apiDeleteTask(taskId, authToken);
     setTasks((current) => current.filter((task) => task.id !== taskId));
     if (selectedTask?.id === taskId) setSelectedTask(null);
-  };
-
-  const handleWorkflow = async (task: DeliveryTask, action: 'submit' | 'approve' | 'reject' | 'block' | 'unblock') => {
-    if (!authToken) return;
-    const updated = action === 'submit'
-      ? await apiSubmitTaskForReview(task.id, { note: commentBody || null }, authToken)
-      : await apiTaskApproval(task.id, { action, comment: commentBody || null }, authToken);
-    refreshTask(updated);
-    setCommentBody('');
-    setFeedback(`Task ${action === 'submit' ? 'submitted for review' : `${action}d`}.`);
   };
 
   const handleAddComment = async () => {
@@ -459,11 +462,11 @@ export default function TaskTracker() {
       {isFormOpen && (
         <form onSubmit={handleCreate} className="bg-surface border border-border rounded-xl p-5 shadow-sm space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <select aria-label="Task account" value={form.accountId} onChange={(event) => setForm({ ...form, accountId: event.target.value, projectId: '', assigneeId: '', extraAssigneeIds: [] })} required className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
+            <select aria-label="Task account" value={form.accountId} onChange={(event) => setForm({ ...form, accountId: event.target.value, projectId: '', assigneeId: '' })} required className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
               <option value="">Select account</option>
               {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
             </select>
-            <select aria-label="Task project" value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value, assigneeId: '', extraAssigneeIds: [] })} required className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
+            <select aria-label="Task project" value={form.projectId} onChange={(event) => setForm({ ...form, projectId: event.target.value, assigneeId: '' })} required className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
               <option value="">Select project</option>
               {formProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
@@ -476,13 +479,10 @@ export default function TaskTracker() {
             <input aria-label="Start date" type="date" value={form.startDate} onChange={(event) => setForm({ ...form, startDate: event.target.value })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
             <input aria-label="Due date" type="date" min={form.startDate || undefined} value={form.dueDate} onChange={(event) => setForm({ ...form, dueDate: event.target.value })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600" />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <select disabled={!form.projectId || loadingAssignees} value={form.assigneeId} onChange={(event) => setForm({ ...form, assigneeId: event.target.value, extraAssigneeIds: form.extraAssigneeIds.filter((id) => id !== event.target.value) })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 disabled:opacity-60">
-              <option value="">{loadingAssignees ? 'Loading allocated developers...' : 'Primary assignee (optional)'}</option>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <select aria-label="Assigned To" required disabled={!form.projectId || loadingAssignees || eligibleAssignees.length === 0} value={form.assigneeId} onChange={(event) => setForm({ ...form, assigneeId: event.target.value })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 disabled:opacity-60">
+              <option value="">{loadingAssignees ? 'Loading eligible project members...' : 'Assigned To'}</option>
               {eligibleAssignees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} — {employee.title}</option>)}
-            </select>
-            <select aria-label="Additional assignees" disabled={!form.projectId || loadingAssignees} multiple value={form.extraAssigneeIds} onChange={(event) => setForm({ ...form, extraAssigneeIds: Array.from(event.target.selectedOptions, (option) => option.value) })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 min-h-10 disabled:opacity-60">
-              {eligibleAssignees.filter((employee) => employee.id !== form.assigneeId).map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
             </select>
             <select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value as TaskPriority })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
               <option value="low">Low</option>
@@ -490,12 +490,9 @@ export default function TaskTracker() {
               <option value="high">High</option>
               <option value="critical">Critical</option>
             </select>
-            <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as TaskStatus })} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600">
-              {statusColumns.map((status) => <option key={status.key} value={status.key}>{status.label}</option>)}
-            </select>
           </div>
           {form.projectId && !loadingAssignees && eligibleAssignees.length === 0 && (
-            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">No developers are allocated to this project. Allocate a developer before creating an assigned task.</p>
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">No eligible developers/testers are allocated to this project.</p>
           )}
           <div className="grid grid-cols-1 md:grid-cols-[1fr_180px_180px_auto] gap-3">
             <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Description" rows={3} className="bg-surface-alt border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-600 resize-none" />
@@ -678,7 +675,7 @@ export default function TaskTracker() {
                     {columnTasks.map((task) => {
                       const assignee = employees.find((employee) => employee.id === task.assignee_id);
                       const isDragged = draggedTaskId === task.id;
-                      const canDrag = previewRole !== 'employee' || task.assignee_id === currentUser?.id || Boolean(currentUser && task.assignee_ids?.includes(currentUser.id));
+                      const canDrag = allowedDestinations(task, canGovernWorkflow, currentUser?.id).length > 0;
                       return (
                         <article
                           key={task.id}
@@ -702,6 +699,7 @@ export default function TaskTracker() {
                             zIndex: isDragged ? 10 : 1,
                           }}
                         >
+                          <p className="truncate font-mono text-[9px] font-semibold uppercase tracking-wide text-ink-faint">{taskNumber(tasks, task.id)} · {task.project_name || 'Project'}</p>
                           <div className="flex items-start justify-between gap-2">
                             <h4 className="truncate text-[13px] font-semibold leading-snug text-ink" title={task.title}>{task.title}</h4>
                             {canManage && (
@@ -849,10 +847,6 @@ export default function TaskTracker() {
                 <textarea value={commentBody} onChange={(event) => setCommentBody(event.target.value)} rows={3} placeholder="Comment, review note, or rejection/blocker reason" className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 text-sm outline-none focus:border-blue-600 resize-none" />
                 <div className="flex flex-wrap gap-2">
                   <button onClick={handleAddComment} className="rounded-lg border border-border px-3 py-2 text-xs font-semibold text-ink-soft hover:bg-surface-alt">Add Comment</button>
-                  <button onClick={() => handleWorkflow(selectedTask, 'submit')} className="rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white">Submit Review</button>
-                  {canManage && <button onClick={() => handleWorkflow(selectedTask, 'approve')} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white">Approve</button>}
-                  {canManage && <button onClick={() => handleWorkflow(selectedTask, 'reject')} className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white">Reject</button>}
-                  {canManage && <button onClick={() => handleWorkflow(selectedTask, selectedTask.status === 'blocked' ? 'unblock' : 'block')} className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white">{selectedTask.status === 'blocked' ? 'Unblock' : 'Block'}</button>}
                 </div>
                 <div className="space-y-2">
                   {comments.map((comment) => (
@@ -864,8 +858,9 @@ export default function TaskTracker() {
                 </div>
               </div>
               <div className="space-y-3 text-xs">
-                <select value={selectedTask.status} onChange={(event) => { void handleStatusChange(selectedTask, event.target.value as TaskStatus).catch(() => undefined); }} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2">
-                  {statusColumns.map((status) => <option key={status.key} value={status.key}>{status.label}</option>)}
+                <select value="" disabled={allowedDestinations(selectedTask, canGovernWorkflow, currentUser?.id).length === 0} onChange={(event) => { void handleStatusChange(selectedTask, event.target.value as TaskStatus).catch(() => undefined); }} className="w-full rounded-lg border border-border bg-surface-alt px-3 py-2 disabled:opacity-60">
+                  <option value="">{selectedTask.status === 'done' ? 'Done — terminal' : 'Move to…'}</option>
+                  {allowedDestinations(selectedTask, canGovernWorkflow, currentUser?.id).map((status) => <option key={status} value={status}>{statusColumns.find((column) => column.key === status)?.label}</option>)}
                 </select>
                 <div className="rounded-lg border border-border bg-surface-alt p-3">
                   <p className="font-bold text-ink">Account / Project</p>
@@ -890,6 +885,12 @@ export default function TaskTracker() {
                 <div className="rounded-lg border border-border bg-surface-alt p-3">
                   <p className="font-bold text-ink">Labels</p>
                   <p className="mt-1 text-ink-soft">{selectedTask.labels?.join(', ') || '-'}</p>
+                </div>
+                <div className="rounded-lg border border-border bg-surface-alt p-3">
+                  <p className="font-bold text-ink">Status history</p>
+                  {statusHistory.length === 0 ? <p className="mt-1 text-ink-faint">No status changes yet.</p> : statusHistory.map((entry) => (
+                    <p key={entry.id} className="mt-2 text-ink-soft">{statusColumns.find((item) => item.key === entry.previous_status)?.label} → {statusColumns.find((item) => item.key === entry.new_status)?.label}<span className="block text-[10px] text-ink-faint">{entry.changed_by_name || 'Former user'} · {new Date(entry.changed_at).toLocaleString()}</span></p>
+                  ))}
                 </div>
               </div>
             </div>

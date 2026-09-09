@@ -1,15 +1,27 @@
+import { useEffect, useState } from 'react';
 import { Menu, Search, Bell, Moon, ChevronDown } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { useNavigate } from 'react-router-dom';
+import { apiListNotifications } from '../services/api';
 
 export default function Topbar({ toggleSidebar }: { toggleSidebar: () => void }) {
-  const { previewRole, logout, currentUser, submissions, settings, updateSettings } = useStore();
+  const { previewRole, logout, currentUser, authToken, submissions, settings, updateSettings } = useStore();
+  const [taskUnreadCount, setTaskUnreadCount] = useState(0);
   const navigate = useNavigate();
   const isManager = previewRole === 'manager' || previewRole === 'project_director' || previewRole === 'studio_head';
 
-  const unreadCount = isManager
+  const existingUnreadCount = isManager
     ? submissions.filter(s => s.status === 'submitted').length
     : submissions.filter(s => s.employeeId === currentUser?.id && s.status === 'rejected').length;
+  const unreadCount = existingUnreadCount + taskUnreadCount;
+
+  useEffect(() => {
+    if (!authToken) return;
+    const load = () => apiListNotifications(authToken).then((items) => setTaskUnreadCount(items.filter((item) => !item.is_read).length)).catch(() => undefined);
+    void load();
+    window.addEventListener('focus', load);
+    return () => window.removeEventListener('focus', load);
+  }, [authToken]);
 
   const userInitials = currentUser?.name
     ? currentUser.name.split(' ').map(n => n[0]).join('')

@@ -103,6 +103,17 @@ def ensure_schema_upgrades() -> None:
                 if column_name not in existing_columns:
                     conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
 
+        # Preserve legacy multi-assignment data while making tasks.assignee_id
+        # the application's only assignment source of truth.
+        if "tasks" in existing_tables and "task_assignments" in existing_tables:
+            conn.execute(text(
+                "UPDATE tasks SET assignee_id = ("
+                "SELECT ta.employee_id FROM task_assignments ta "
+                "WHERE ta.task_id = tasks.id ORDER BY ta.assigned_at, ta.id LIMIT 1"
+                ") WHERE assignee_id IS NULL AND EXISTS ("
+                "SELECT 1 FROM task_assignments ta WHERE ta.task_id = tasks.id)"
+            ))
+
         # SQLAlchemy persists Python Enum member names in MySQL. Expand the
         # existing enums additively so deployments created before these roles
         # continue to accept the complete organization hierarchy.

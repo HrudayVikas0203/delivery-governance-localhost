@@ -347,6 +347,26 @@ export async function apiListTaskComments(taskId: string, token: string) {
   return request<any[]>(`/tasks/${taskId}/comments`, { method: 'GET' }, token);
 }
 
+export async function apiListTaskHistory(taskId: string, token: string) {
+  return request<any[]>(`/tasks/${taskId}/history`, { method: 'GET' }, token);
+}
+
+export async function apiListNotifications(token: string) {
+  return request<any[]>('/notifications', { method: 'GET' }, token);
+}
+
+export async function apiSetNotificationRead(notificationId: string, isRead: boolean, token: string) {
+  return request<any>(`/notifications/${notificationId}/read?is_read=${isRead}`, { method: 'PATCH' }, token);
+}
+
+export async function apiMarkAllNotificationsRead(token: string) {
+  return request<void>('/notifications/read-all', { method: 'POST' }, token);
+}
+
+export async function apiClearNotifications(token: string) {
+  return request<void>('/notifications', { method: 'DELETE' }, token);
+}
+
 export async function apiAddTaskComment(taskId: string, payload: unknown, token: string) {
   return request<any>(`/tasks/${taskId}/comments`, { method: 'POST', body: JSON.stringify(payload) }, token);
 }

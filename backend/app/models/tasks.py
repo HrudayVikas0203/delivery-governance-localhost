@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Date, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -66,22 +66,40 @@ class Task(Base):
     project = relationship("Project", back_populates="tasks")
     assignee = relationship("Employee", foreign_keys=[assignee_id])
     reporter = relationship("Employee", foreign_keys=[reporter_id])
-    assignments = relationship("TaskAssignment", back_populates="task", cascade="all, delete-orphan")
+    status_history = relationship("TaskStatusHistory", back_populates="task", cascade="all, delete-orphan")
+    notifications = relationship("TaskNotification", back_populates="task", cascade="all, delete-orphan")
     comments = relationship("TaskComment", back_populates="task", cascade="all, delete-orphan")
     attachments = relationship("TaskAttachment", back_populates="task", cascade="all, delete-orphan")
 
 
-class TaskAssignment(Base):
-    __tablename__ = "task_assignments"
-    __table_args__ = (UniqueConstraint("task_id", "employee_id", name="uq_task_employee_assignment"),)
+class TaskStatusHistory(Base):
+    __tablename__ = "task_status_history"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True, nullable=False)
-    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True, nullable=False)
-    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    previous_status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), nullable=False)
+    new_status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), nullable=False)
+    changed_by_id: Mapped[str | None] = mapped_column(ForeignKey("employees.id", ondelete="SET NULL"), index=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
-    task = relationship("Task", back_populates="assignments")
-    employee = relationship("Employee")
+    task = relationship("Task", back_populates="status_history")
+    changed_by = relationship("Employee")
+
+
+class TaskNotification(Base):
+    __tablename__ = "task_notifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    recipient_id: Mapped[str] = mapped_column(ForeignKey("employees.id", ondelete="CASCADE"), index=True, nullable=False)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    notification_type: Mapped[str] = mapped_column(String(40), nullable=False, default="info")
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    recipient = relationship("Employee")
+    task = relationship("Task", back_populates="notifications")
 
 
 class TaskComment(Base):

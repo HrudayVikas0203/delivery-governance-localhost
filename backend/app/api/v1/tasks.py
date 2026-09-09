@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -9,12 +9,32 @@ from app.core.security import get_current_user, require_min_role
 from app.db.session import get_db
 from app.models.delivery import Account, AllocationRole, Project, ResourceAllocation
 from app.models.people import Employee, Role
-from app.models.tasks import Task, TaskAssignment, TaskComment, TaskPriority, TaskStatus, TaskType
-from app.schemas.common import EligibleTaskAssigneeOut, TaskApprovalAction, TaskCommentCreate, TaskCommentOut, TaskCreate, TaskOut, TaskReviewSubmit, TaskUpdate
+from app.models.tasks import Task, TaskComment, TaskNotification, TaskPriority, TaskStatus, TaskStatusHistory, TaskType
+from app.schemas.common import EligibleTaskAssigneeOut, TaskApprovalAction, TaskCommentCreate, TaskCommentOut, TaskCreate, TaskOut, TaskReviewSubmit, TaskStatusHistoryOut, TaskStatusUpdate, TaskUpdate
 from app.services.audit import audit
 from app.services.access import can_manage_project, require_project_access, require_project_manager, visible_project_ids
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+MANAGER_ALLOCATION_ROLES = {
+    AllocationRole.STUDIO_HEAD,
+    AllocationRole.PROGRAM_MANAGER,
+    AllocationRole.PROJECT_MANAGER,
+}
+
+EXECUTION_ROLES = set(AllocationRole) - MANAGER_ALLOCATION_ROLES
+
+ASSIGNEE_TRANSITIONS = {
+    TaskStatus.TODO: {TaskStatus.IN_PROGRESS},
+    TaskStatus.IN_PROGRESS: {TaskStatus.REVIEW},
+}
+
+MANAGER_TRANSITIONS = {
+    TaskStatus.TODO: {TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED},
+    TaskStatus.IN_PROGRESS: {TaskStatus.REVIEW, TaskStatus.BLOCKED},
+    TaskStatus.REVIEW: {TaskStatus.BLOCKED, TaskStatus.DONE},
+    TaskStatus.BLOCKED: {TaskStatus.DONE},
+}
 
 
 def _labels_to_text(labels: list[str] | None) -> str | None:
@@ -30,26 +50,18 @@ def _hydrate_task(task: Task, db: Session) -> Task:
     reporter = db.get(Employee, task.reporter_id) if task.reporter_id else None
     if isinstance(task.labels, str):
         setattr(task, "labels", task.labels.split(",") if task.labels else [])
-    setattr(task, "assignee_ids", [assignment.employee_id for assignment in task.assignments])
+    elif task.labels is None:
+        setattr(task, "labels", [])
+    if task.tags is None:
+        task.tags = []
+    if task.checklist is None:
+        task.checklist = []
     setattr(task, "project_name", project.name if project else None)
     setattr(task, "account_id", project.account_id if project else "")
     setattr(task, "account_name", account.name if account else None)
     setattr(task, "assignee_name", assignee.name if assignee else None)
     setattr(task, "reporter_name", reporter.name if reporter else None)
     return task
-
-
-def _sync_assignments(task: Task, assignee_ids: list[str], db: Session) -> None:
-    existing = {assignment.employee_id: assignment for assignment in task.assignments}
-    requested = set(assignee_ids)
-    for employee_id in requested:
-        if not db.get(Employee, employee_id):
-            raise HTTPException(status_code=404, detail=f"Assignee {employee_id} not found")
-        if employee_id not in existing:
-            db.add(TaskAssignment(task_id=task.id, employee_id=employee_id))
-    for employee_id, assignment in existing.items():
-        if employee_id not in requested:
-            db.delete(assignment)
 
 
 def _project_allocation(project_id: str, employee_id: str, db: Session) -> ResourceAllocation | None:
@@ -77,18 +89,18 @@ def _ensure_task_authority(project: Project, actor: Employee, db: Session) -> No
     raise HTTPException(status_code=403, detail="You do not have permission to manage tasks for this project.")
 
 
-def _ensure_assignees_are_project_team(project_id: str, assignee_ids: list[str], db: Session) -> None:
-    for assignee_id in assignee_ids:
-        employee = db.get(Employee, assignee_id)
-        allocation = _project_allocation(project_id, assignee_id, db)
-        if not employee or not employee.is_active or not allocation:
-            raise HTTPException(status_code=422, detail="The selected developer is not allocated to this project.")
+def _ensure_assignee_is_eligible(project_id: str, assignee_id: str, db: Session) -> Employee:
+    employee = db.get(Employee, assignee_id)
+    allocation = _project_allocation(project_id, assignee_id, db)
+    if not employee or not employee.is_active or not allocation:
+        raise HTTPException(status_code=422, detail="The selected person is not an active resource on this project.")
+    if employee.role in {Role.PROJECT_MANAGER, Role.PROGRAM_MANAGER, Role.PROGRAM_DIRECTOR, Role.DELIVERY_HEAD, Role.STUDIO_HEAD} or allocation.allocation_role not in EXECUTION_ROLES:
+        raise HTTPException(status_code=422, detail="Project and program managers cannot be assigned tasks.")
+    return employee
 
 
 def _task_is_assigned_to(task: Task, employee_id: str) -> bool:
-    return task.assignee_id == employee_id or any(
-        assignment.employee_id == employee_id for assignment in task.assignments
-    )
+    return task.assignee_id == employee_id
 
 
 def _require_task_access(task: Task | None, actor: Employee, db: Session) -> Task:
@@ -98,6 +110,75 @@ def _require_task_access(task: Task | None, actor: Employee, db: Session) -> Tas
     if actor.role in {Role.DEVELOPER, Role.INTERN} and not _task_is_assigned_to(task, actor.id):
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+def _manager_recipient_ids(project: Project, db: Session) -> set[str]:
+    account = db.get(Account, project.account_id)
+    return {
+        employee_id
+        for employee_id in {
+            project.project_manager_id,
+            project.program_manager_id,
+            account.program_manager_id if account else None,
+        }
+        if employee_id
+    }
+
+
+def _notify(db: Session, recipient_ids: set[str], task: Task, notification_type: str, title: str, message: str) -> None:
+    for recipient_id in recipient_ids:
+        db.add(TaskNotification(
+            recipient_id=recipient_id,
+            task_id=task.id,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+        ))
+
+
+def _change_status(task: Task, next_status: TaskStatus, actor: Employee, project: Project, db: Session, blocker_reason: str | None = None) -> None:
+    previous_status = task.status
+    if next_status == previous_status:
+        return
+    if not task.assignee_id:
+        raise HTTPException(status_code=409, detail="Assign an eligible project member before moving this task.")
+    manager = can_manage_project(actor, project, db.get(Account, project.account_id))
+    allowed = MANAGER_TRANSITIONS.get(previous_status, set()) if manager else ASSIGNEE_TRANSITIONS.get(previous_status, set())
+    if not manager and task.assignee_id != actor.id:
+        raise HTTPException(status_code=403, detail="Only the assigned person can move this task.")
+    if next_status not in allowed:
+        raise HTTPException(status_code=409, detail="Invalid task status transition")
+    if next_status == TaskStatus.BLOCKED and not manager:
+        raise HTTPException(status_code=403, detail="Only a project or program manager can block a task.")
+    if next_status == TaskStatus.DONE and not manager:
+        raise HTTPException(status_code=403, detail="Only a project or program manager can complete a task.")
+
+    task.status = next_status
+    task.blocker_reason = blocker_reason if next_status == TaskStatus.BLOCKED else task.blocker_reason
+    now = datetime.now(timezone.utc)
+    if next_status == TaskStatus.REVIEW:
+        task.submitted_for_review_at = now
+    if next_status == TaskStatus.DONE:
+        task.approved_at = now
+    db.add(TaskStatusHistory(
+        task_id=task.id,
+        previous_status=previous_status,
+        new_status=next_status,
+        changed_by_id=actor.id,
+    ))
+    audit(db, actor.id, "Task Completed" if next_status == TaskStatus.DONE else "Task Status Updated", "Task Tracker", f"Task {task.title} moved from {previous_status.value} to {next_status.value}")
+
+    task_ref = f"TASK-{task.id[:8].upper()}"
+    if next_status == TaskStatus.REVIEW:
+        _notify(db, _manager_recipient_ids(project, db), task, "alert", "Task ready for review", f"{task_ref} has been moved to In Review by {actor.name}.")
+    elif next_status == TaskStatus.BLOCKED:
+        recipients = _manager_recipient_ids(project, db) | ({task.assignee_id} if task.assignee_id else set())
+        _notify(db, recipients - {actor.id}, task, "alert", "Task blocked", f"{task_ref} has been marked Blocked.")
+    elif next_status == TaskStatus.DONE:
+        recipients = _manager_recipient_ids(project, db) | ({task.assignee_id} if task.assignee_id else set())
+        _notify(db, recipients - {actor.id}, task, "success", "Task completed", f"{task_ref} has been moved to Done.")
+    elif next_status == TaskStatus.IN_PROGRESS:
+        _notify(db, _manager_recipient_ids(project, db) - {actor.id}, task, "info", "Task in progress", f"{task_ref} has been moved to In Progress by {actor.name}.")
 
 
 @router.get("/projects/{project_id}/eligible-assignees", response_model=list[EligibleTaskAssigneeOut])
@@ -115,13 +196,8 @@ def eligible_task_assignees(
         .where(
             ResourceAllocation.project_id == project_id,
             ResourceAllocation.is_active.is_(True),
-            ResourceAllocation.allocation_role.notin_(
-                {
-                    AllocationRole.STUDIO_HEAD,
-                    AllocationRole.PROGRAM_MANAGER,
-                    AllocationRole.PROJECT_MANAGER,
-                }
-            ),
+            ResourceAllocation.allocation_role.in_(EXECUTION_ROLES),
+            Employee.role.notin_({Role.PROJECT_MANAGER, Role.PROGRAM_MANAGER, Role.PROGRAM_DIRECTOR, Role.DELIVERY_HEAD, Role.STUDIO_HEAD}),
             Employee.is_active.is_(True),
         )
         .order_by(Employee.name)
@@ -158,23 +234,13 @@ def list_tasks(
         return []
     stmt = select(Task).join(Project, Project.id == Task.project_id).where(Task.project_id.in_(allowed_ids))
     if actor.role in {Role.DEVELOPER, Role.INTERN}:
-        stmt = stmt.where(
-            or_(
-                Task.assignee_id == actor.id,
-                Task.assignments.any(TaskAssignment.employee_id == actor.id),
-            )
-        )
+        stmt = stmt.where(Task.assignee_id == actor.id)
     if account_id:
         stmt = stmt.where(Project.account_id == account_id)
     if project_id:
         stmt = stmt.where(Task.project_id == project_id)
     if assignee_id:
-        stmt = stmt.where(
-            or_(
-                Task.assignee_id == assignee_id,
-                Task.assignments.any(TaskAssignment.employee_id == assignee_id),
-            )
-        )
+        stmt = stmt.where(Task.assignee_id == assignee_id)
     if reporter_id:
         stmt = stmt.where(Task.reporter_id == reporter_id)
     if task_status:
@@ -207,22 +273,20 @@ def create_task(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     _ensure_task_authority(project, actor, db)
-    assignee_ids = list(dict.fromkeys(([payload.assignee_id] if payload.assignee_id else []) + payload.assignee_ids))
-    _ensure_assignees_are_project_team(payload.project_id, assignee_ids, db)
+    assignee = _ensure_assignee_is_eligible(payload.project_id, payload.assignee_id, db)
 
     task = Task(
-        **payload.model_dump(exclude={"labels", "assignee_id", "assignee_ids"}),
+        **payload.model_dump(exclude={"labels", "assignee_id"}),
         reporter_id=actor.id,
-        assignee_id=payload.assignee_id or (assignee_ids[0] if assignee_ids else None),
+        assignee_id=payload.assignee_id,
         labels=_labels_to_text(payload.labels),
     )
     try:
         db.add(task)
         db.flush()
-        _sync_assignments(task, assignee_ids, db)
         audit(db, actor.id, "Task Created", "Task Tracker", f"Task {task.title} created for project {project.name}")
-        if assignee_ids:
-            audit(db, actor.id, "Task Assigned", "Task Tracker", f"Task {task.title} assigned to {len(assignee_ids)} project resource(s)")
+        audit(db, actor.id, "Task Assigned", "Task Tracker", f"Task {task.title} assigned to {assignee.name}")
+        _notify(db, {assignee.id}, task, "info", "Task assigned", f"You have been assigned task TASK-{task.id[:8].upper()} for {project.name}.")
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -254,11 +318,8 @@ def update_task(
             raise HTTPException(status_code=422, detail="Due date cannot be before start date.")
     if "labels" in data:
         data["labels"] = _labels_to_text(data["labels"])
-    assignee_ids = data.pop("assignee_ids", None)
-    requested_assignees = list(assignee_ids or [])
-    if data.get("assignee_id"):
-        requested_assignees.append(data["assignee_id"])
-    _ensure_assignees_are_project_team(task.project_id, list(dict.fromkeys(requested_assignees)), db)
+    if "assignee_id" in data:
+        _ensure_assignee_is_eligible(task.project_id, data["assignee_id"], db)
     previous_assignee_id = task.assignee_id
     previous_priority = task.priority
     previous_due_date = task.due_date
@@ -267,13 +328,10 @@ def update_task(
         if getattr(task, key) != value:
             changes.append(key)
         setattr(task, key, value)
-    if assignee_ids is not None:
-        _sync_assignments(task, assignee_ids, db)
-        task.assignee_id = assignee_ids[0] if assignee_ids else task.assignee_id
-        changes.append("assignee")
     audit(db, actor.id, "Task Updated", "Task Tracker", f"Task {task.title} updated: {', '.join(changes) or 'no field changes'}")
-    if task.assignee_id != previous_assignee_id or assignee_ids is not None:
+    if task.assignee_id != previous_assignee_id:
         audit(db, actor.id, "Task Reassigned", "Task Tracker", f"Task {task.title} assignment changed")
+        _notify(db, {task.assignee_id}, task, "info", "Task reassigned", f"You have been assigned task TASK-{task.id[:8].upper()} for {project.name}.")
     if task.priority != previous_priority:
         audit(db, actor.id, "Task Priority Changed", "Task Tracker", f"Task {task.title} priority changed from {previous_priority.value} to {task.priority.value}")
     if task.due_date != previous_due_date:
@@ -293,7 +351,7 @@ def update_task(
 @router.put("/{task_id}/status", response_model=TaskOut)
 def update_task_status(
     task_id: str,
-    payload: TaskUpdate,
+    payload: TaskStatusUpdate,
     db: Session = Depends(get_db),
     actor: Employee = Depends(get_current_user),
 ) -> Task:
@@ -301,14 +359,7 @@ def update_task_status(
         raise HTTPException(status_code=400, detail="Status is required")
     task = _require_task_access(db.get(Task, task_id), actor, db)
     project = require_project_access(db, actor, db.get(Project, task.project_id))
-    assigned_ids = {task.assignee_id, *[assignment.employee_id for assignment in task.assignments]}
-    if actor.id not in assigned_ids:
-        _ensure_task_authority(project, actor, db)
-    previous_status = task.status
-    task.status = payload.status
-    task.blocker_reason = payload.blocker_reason
-    action = "Task Completed" if payload.status == TaskStatus.DONE else "Task Status Updated"
-    audit(db, actor.id, action, "Task Tracker", f"Task {task.title} moved from {previous_status.value} to {payload.status.value}")
+    _change_status(task, payload.status, actor, project, db, payload.blocker_reason)
     try:
         db.commit()
     except SQLAlchemyError as exc:
@@ -326,11 +377,10 @@ def submit_for_review(
     actor: Employee = Depends(get_current_user),
 ) -> Task:
     task = _require_task_access(db.get(Task, task_id), actor, db)
-    if actor.id not in {task.assignee_id, *[assignment.employee_id for assignment in task.assignments]}:
+    if actor.id != task.assignee_id:
         raise HTTPException(status_code=403, detail="Only assigned employees can submit this task for review")
-    task.status = TaskStatus.REVIEW
-    task.submitted_for_review_at = datetime.now(timezone.utc)
-    audit(db, actor.id, "Task Submitted for Review", "Task Tracker", f"Task {task.title} submitted for review")
+    project = require_project_access(db, actor, db.get(Project, task.project_id))
+    _change_status(task, TaskStatus.REVIEW, actor, project, db)
     db.commit()
     db.refresh(task)
     return _hydrate_task(task, db)
@@ -349,22 +399,28 @@ def task_approval(
     project = require_project_access(db, actor, db.get(Project, task.project_id))
     require_project_manager(actor, project, db.get(Account, project.account_id))
     if payload.action == "approve":
-        task.status = TaskStatus.DONE
-        task.approved_at = datetime.now(timezone.utc)
+        _change_status(task, TaskStatus.DONE, actor, project, db)
         task.rejection_reason = None
-    elif payload.action in {"reject", "changes_requested"}:
-        task.status = TaskStatus.IN_PROGRESS
-        task.rejection_reason = payload.comment or "Changes requested"
     elif payload.action == "block":
-        task.status = TaskStatus.BLOCKED
-        task.blocker_reason = payload.comment or task.blocker_reason
-    elif payload.action == "unblock":
-        task.status = TaskStatus.IN_PROGRESS
-        task.blocker_reason = None
-    audit(db, actor.id, f"Task {payload.action.title()}", "Task Tracker", f"Task {task.title}: {payload.comment or payload.action}")
+        _change_status(task, TaskStatus.BLOCKED, actor, project, db, payload.comment)
+    else:
+        raise HTTPException(status_code=409, detail="Invalid task status transition")
     db.commit()
     db.refresh(task)
     return _hydrate_task(task, db)
+
+
+@router.get("/{task_id}/history", response_model=list[TaskStatusHistoryOut])
+def task_status_history(
+    task_id: str,
+    db: Session = Depends(get_db),
+    actor: Employee = Depends(get_current_user),
+) -> list[TaskStatusHistory]:
+    task = _require_task_access(db.get(Task, task_id), actor, db)
+    history = db.scalars(select(TaskStatusHistory).where(TaskStatusHistory.task_id == task.id).order_by(TaskStatusHistory.changed_at)).all()
+    for entry in history:
+        setattr(entry, "changed_by_name", entry.changed_by.name if entry.changed_by else None)
+    return list(history)
 
 
 @router.delete("/{task_id}", status_code=204)

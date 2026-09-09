@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Activity, CheckCircle, Clock, Users, AlertTriangle, ArrowRight, FileText, 
@@ -7,13 +7,21 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import KpiCard from '../components/KpiCard';
+import { apiListTasks } from '../services/api';
+import type { DeliveryTask } from '../types';
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { previewRole, currentUser, submissions, employees, projects, accounts, allocations } = useStore();
+  const { previewRole, currentUser, authToken, submissions, employees, projects, accounts, allocations } = useStore();
+  const [assignedTasks, setAssignedTasks] = useState<DeliveryTask[]>([]);
   
   const isManager = previewRole === 'manager';
   const isStudioHead = previewRole === 'studio_head';
   const isProjectDirector = previewRole === 'project_director';
+
+  useEffect(() => {
+    if (!authToken) return;
+    apiListTasks(authToken).then(setAssignedTasks).catch(() => setAssignedTasks([]));
+  }, [authToken]);
 
   // ==================== WEEKS & COMPLIANCE STATE ====================
   // Get all unique weeks available in the status entries
@@ -188,6 +196,16 @@ export default function Dashboard() {
       </div>
 
       {/* ──────────────────────────────────────────────────────── */}
+      {!isStudioHead && !isProjectDirector && !isManager && (
+        <section className="rounded-xl border border-border bg-surface p-5 shadow-sm">
+          <div className="flex items-center justify-between gap-3"><div><h2 className="text-sm font-bold text-ink">My Tasks</h2><p className="mt-1 text-xs text-ink-soft">Work assigned to your authenticated login.</p></div><button onClick={() => navigate('/tasks')} className="flex items-center gap-1 text-xs font-semibold text-blue-600">Open Kanban <ArrowRight size={13} /></button></div>
+          <div className="mt-4 grid grid-cols-3 gap-3">
+            {[['To Do', 'todo'], ['In Progress', 'in_progress'], ['In Review', 'review']].map(([label, status]) => <button key={status} onClick={() => navigate('/tasks')} className="rounded-lg border border-border bg-surface-alt p-3 text-left"><span className="text-[10px] font-bold uppercase tracking-wide text-ink-faint">{label}</span><strong className="mt-1 block text-2xl text-ink">{assignedTasks.filter((task) => task.status === status).length}</strong></button>)}
+          </div>
+          <div className="mt-3 space-y-2">{assignedTasks.filter((task) => task.status !== 'done').slice(0, 4).map((task) => <button key={task.id} onClick={() => navigate('/tasks')} className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-left text-xs hover:border-blue-200"><span><strong className="block text-ink">{task.title}</strong><span className="text-ink-faint">{task.project_name} · {task.priority}</span></span><ArrowRight size={13} className="text-blue-600" /></button>)}</div>
+        </section>
+      )}
+
       {/* 1. STUDIO HEAD VIEW */}
       {isStudioHead && (
         <div className="space-y-6 animate-[fadeIn_0.2s_ease]">

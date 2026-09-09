@@ -178,11 +178,12 @@ class AllocationOut(ORMModel):
 
 
 class TaskCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     project_id: str
     title: str = Field(min_length=3, max_length=220)
     description: str | None = None
-    assignee_id: str | None = None
-    assignee_ids: list[str] = Field(default_factory=list)
+    assignee_id: str = Field(min_length=1)
     start_date: date | None = None
     due_date: date | None = None
     task_type: TaskType = TaskType.OTHER
@@ -198,19 +199,21 @@ class TaskCreate(BaseModel):
     def validate_dates(self) -> "TaskCreate":
         if self.start_date and self.due_date and self.due_date < self.start_date:
             raise ValueError("Due date cannot be before start date")
+        if self.status != TaskStatus.TODO:
+            raise ValueError("New tasks must start in To Do")
         return self
 
 
 class TaskUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=3, max_length=220)
     description: str | None = None
     assignee_id: str | None = None
-    assignee_ids: list[str] | None = None
     start_date: date | None = None
     due_date: date | None = None
     task_type: TaskType | None = None
     priority: TaskPriority | None = None
-    status: TaskStatus | None = None
     estimate_hours: int | None = Field(default=None, ge=0)
     actual_hours: int | None = Field(default=None, ge=0)
     labels: list[str] | None = None
@@ -218,6 +221,12 @@ class TaskUpdate(BaseModel):
     checklist: list[dict | str] | None = None
     blocker_reason: str | None = None
     rejection_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_assignment(self) -> "TaskUpdate":
+        if "assignee_id" in self.model_fields_set and not self.assignee_id:
+            raise ValueError("Assigned To is required")
+        return self
 
 
 class TaskOut(ORMModel):
@@ -238,7 +247,6 @@ class TaskOut(ORMModel):
     labels: list[str] = []
     tags: list[str] = []
     checklist: list[dict | str] = []
-    assignee_ids: list[str] = []
     blocker_reason: str | None
     rejection_reason: str | None = None
     submitted_for_review_at: datetime | None = None
@@ -260,6 +268,34 @@ class EligibleTaskAssigneeOut(BaseModel):
     allocation_role: AllocationRole
 
 
+class TaskStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: TaskStatus
+    blocker_reason: str | None = None
+
+
+class TaskStatusHistoryOut(ORMModel):
+    id: str
+    task_id: str
+    previous_status: TaskStatus
+    new_status: TaskStatus
+    changed_by_id: str | None
+    changed_by_name: str | None = None
+    changed_at: datetime
+
+
+class TaskNotificationOut(ORMModel):
+    id: str
+    recipient_id: str
+    task_id: str | None
+    notification_type: str
+    title: str
+    message: str
+    is_read: bool
+    created_at: datetime
+
+
 class TaskCommentCreate(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
@@ -278,7 +314,7 @@ class TaskReviewSubmit(BaseModel):
 
 
 class TaskApprovalAction(BaseModel):
-    action: str = Field(pattern="^(approve|reject|changes_requested|block|unblock)$")
+    action: str = Field(pattern="^(approve|block)$")
     comment: str | None = None
 
 

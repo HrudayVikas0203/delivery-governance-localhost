@@ -9,11 +9,13 @@ from app.api.v1.emails import router as emails_router
 from app.api.v1.governance import router as governance_router
 from app.api.v1.reports import router as reports_router
 from app.api.v1.tasks import router as tasks_router
+from app.api.v1.notifications import router as notifications_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router)
 api_router.include_router(governance_router)
 api_router.include_router(tasks_router)
+api_router.include_router(notifications_router)
 api_router.include_router(brd_router)
 api_router.include_router(chat_router)
 api_router.include_router(code_quality_router)

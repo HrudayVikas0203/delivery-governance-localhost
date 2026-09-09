@@ -4,7 +4,7 @@ import {
   Plus, Trash2, Calendar, DollarSign, ClipboardList, Pencil
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { apiCreateTask, apiListTasks, apiUpdateProject } from '../services/api';
+import { apiCreateTask, apiListEligibleTaskAssignees, apiListTasks, apiUpdateProject } from '../services/api';
 import type { DeliveryTask, Employee, ResourceAllocation, TaskPriority } from '../types';
 
 type AllocationRoleKey = 'program' | 'projectManager' | 'architect' | 'developer' | 'qa' | 'devops' | 'intern';
@@ -87,6 +87,7 @@ export default function Projects() {
   const [taskAssigneeId, setTaskAssigneeId] = useState('');
   const [taskPriority, setTaskPriority] = useState<TaskPriority>('medium');
   const [taskDueDate, setTaskDueDate] = useState('');
+  const [taskProjectTeam, setTaskProjectTeam] = useState<Employee[]>([]);
 
   const showFeedback = (type: 'success' | 'error', message: string) => {
     setFeedback({ type, message });
@@ -367,15 +368,21 @@ export default function Projects() {
   const activeFilteredProjects = getFilteredProjects();
   const phases = Array.from(new Set(projects.map(p => p.phase)));
   const selectedTaskProject = projects.find((project) => project.id === taskProjectId);
-  const taskProjectTeam = taskProjectId
-    ? allocations
-      .filter((allocation) => {
-        const role = String(allocation.projectRole).toLowerCase();
-        return allocation.projectId === taskProjectId && !role.includes('manager') && !role.includes('architect');
-      })
-      .map((allocation) => employees.find((employee) => employee.id === allocation.employeeId))
-      .filter(Boolean) as Employee[]
-    : [];
+  useEffect(() => {
+    if (!authToken || !taskProjectId) {
+      setTaskProjectTeam([]);
+      return;
+    }
+    apiListEligibleTaskAssignees(taskProjectId, authToken)
+      .then((members) => setTaskProjectTeam(members.map((member) => ({
+        id: member.id,
+        name: member.name,
+        email: member.email,
+        title: member.title,
+        roleCategory: member.role === 'intern' ? 'Intern' : 'Developer',
+      } as Employee))))
+      .catch(() => setTaskProjectTeam([]));
+  }, [authToken, taskProjectId]);
   const canCreateProjectTasks = Boolean(
     currentUser && taskProjectId && (
       currentUser.roleCategory === 'Studio Head' ||
@@ -419,7 +426,6 @@ export default function Projects() {
         title: taskTitle,
         description: taskDescription,
         assignee_id: taskAssigneeId,
-        assignee_ids: [taskAssigneeId],
         priority: taskPriority,
         due_date: taskDueDate || null,
         labels: ['Project Task'],

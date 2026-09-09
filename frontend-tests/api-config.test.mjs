@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import './brd-studio.test.mjs';
+import './task-workflow.test.mjs';
 
 import {
   buildApiUrl,

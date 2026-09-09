@@ -15,7 +15,7 @@ from app.models.delivery import Account, AccountStatus, AllocationRole, Health, 
 from app.models.email import EmailStatus, ScheduledEmail
 from app.models.people import Employee, Role
 from app.models.status import AIInsight, GeneratedReport, ReportFormat, ReportType, ReportTemplate, SubmissionStatus, WeeklyStatus
-from app.models.tasks import Task, TaskAssignment, TaskPriority, TaskStatus
+from app.models.tasks import Task, TaskPriority, TaskStatus
 from app.reports.generator import generate_report_file
 from app.services.template_storage import store_account_template, validate_pptx_upload
 
@@ -67,16 +67,12 @@ def _allocation(db, project_id: str, employee_id: str, **values) -> None:
         db.add(ResourceAllocation(project_id=project_id, employee_id=employee_id, **values))
 
 
-def _task(db, project_id: str, title: str, assignee_ids: list[str], **values) -> Task:
+def _task(db, project_id: str, title: str, assignee_id: str | None, **values) -> Task:
     task = db.query(Task).filter(Task.project_id == project_id, Task.title == title).one_or_none()
     if not task:
-        task = Task(project_id=project_id, title=title, assignee_id=assignee_ids[0] if assignee_ids else None, **values)
+        task = Task(project_id=project_id, title=title, assignee_id=assignee_id, **values)
         db.add(task)
         db.flush()
-    for employee_id in assignee_ids:
-        exists = db.query(TaskAssignment).filter(TaskAssignment.task_id == task.id, TaskAssignment.employee_id == employee_id).one_or_none()
-        if not exists:
-            db.add(TaskAssignment(task_id=task.id, employee_id=employee_id))
     return task
 
 
@@ -276,7 +272,7 @@ def seed() -> None:
             db,
             trimble_project.id,
             "Finalize finance AI approval matrix and workflow logic",
-            [trimble_arch.id, trimble_pm.id],
+            trimble_arch.id,
             description="Align finance workflows, exception routing, and approval matrix with client control policies.",
             status=TaskStatus.IN_PROGRESS,
             priority=TaskPriority.CRITICAL,
@@ -291,7 +287,7 @@ def seed() -> None:
             db,
             trimble_project.id,
             "Build invoice approval dashboard and exception queue",
-            [trimble_frontend.id],
+            trimble_frontend.id,
             description="Deliver the client-facing approval dashboard for invoice exceptions, summaries, and risk indicators.",
             status=TaskStatus.IN_PROGRESS,
             priority=TaskPriority.HIGH,
@@ -306,7 +302,7 @@ def seed() -> None:
             db,
             trimble_project.id,
             "Integrate ERP ledger and cash forecast connectors",
-            [trimble_backend.id],
+            trimble_backend.id,
             description="Connect ERP ledger and forecast APIs with AI assistant workflow and approval endpoints.",
             status=TaskStatus.IN_PROGRESS,
             priority=TaskPriority.HIGH,
@@ -321,7 +317,7 @@ def seed() -> None:
             db,
             trimble_project.id,
             "Validate AI recommendation confidence and guardrails",
-            [trimble_data.id],
+            trimble_data.id,
             description="Check model recommendations against the finance policy, risk guardrails, and control thresholds.",
             status=TaskStatus.REVIEW,
             priority=TaskPriority.HIGH,
@@ -336,7 +332,7 @@ def seed() -> None:
             db,
             trimble_project.id,
             "Complete regression, UAT prep, and release checklist",
-            [trimble_qa.id],
+            trimble_qa.id,
             description="Run regression and UAT readiness checks across approval, exception, and finance summary workflows.",
             status=TaskStatus.TODO,
             priority=TaskPriority.MEDIUM,
@@ -395,10 +391,10 @@ def seed() -> None:
         _weekly_status(db, sr_dev.id, proj1.id, week_start, status=SubmissionStatus.SUBMITTED, submitted_at=datetime.now(timezone.utc), fields={"achievements": "Completed API integration shell and started payment gateway mapping.", "blockers": "Client credentials pending.", "overallStatus": "Amber", "completionPercent": 72, "hoursWorked": 41})
         _weekly_status(db, qa.id, proj1.id, week_start, status=SubmissionStatus.DRAFT, fields={"achievements": "Regression suite updated.", "blockers": "Waiting for stable UAT build.", "overallStatus": "Green", "completionPercent": 68, "hoursWorked": 38})
 
-        _task(db, proj1.id, "Complete payment gateway credential integration", [sr_dev.id, dev.id], description="Wire client-provided payment credentials into sandbox and production config.", status=TaskStatus.BLOCKED, priority=TaskPriority.CRITICAL, due_date=today + timedelta(days=3), estimate_hours=16, actual_hours=5, labels="integration,client-dependency", tags=["payments", "blocked"], checklist=[{"label": "Receive credentials", "done": False}, {"label": "Validate sandbox payment", "done": False}], blocker_reason="Client has not shared credentials.")
-        _task(db, proj1.id, "Review BRD requirements coverage", [architect.id], description="Validate extracted BRD requirements against project scope.", status=TaskStatus.REVIEW, priority=TaskPriority.HIGH, due_date=today + timedelta(days=2), estimate_hours=6, labels="brd,architecture", tags=["brd"], checklist=[{"label": "Functional coverage", "done": True}, {"label": "NFR coverage", "done": False}])
-        _task(db, proj2.id, "Prepare route optimization demo", [devops.id], description="Package route optimization demo with Redis-backed dispatch simulation.", status=TaskStatus.IN_PROGRESS, priority=TaskPriority.MEDIUM, due_date=today + timedelta(days=5), estimate_hours=12, labels="demo,redis", tags=["demo"])
-        _task(db, proj3.id, "Define FHIR entity model", [intern.id, architect.id], description="Draft patient, encounter, provider, and audit entities for review.", status=TaskStatus.TODO, priority=TaskPriority.HIGH, due_date=today + timedelta(days=8), estimate_hours=10, labels="database,healthcare", tags=["fhir"])
+        _task(db, proj1.id, "Complete payment gateway credential integration", sr_dev.id, description="Wire client-provided payment credentials into sandbox and production config.", status=TaskStatus.BLOCKED, priority=TaskPriority.CRITICAL, due_date=today + timedelta(days=3), estimate_hours=16, actual_hours=5, labels="integration,client-dependency", tags=["payments", "blocked"], checklist=[{"label": "Receive credentials", "done": False}, {"label": "Validate sandbox payment", "done": False}], blocker_reason="Client has not shared credentials.")
+        _task(db, proj1.id, "Review BRD requirements coverage", architect.id, description="Validate extracted BRD requirements against project scope.", status=TaskStatus.REVIEW, priority=TaskPriority.HIGH, due_date=today + timedelta(days=2), estimate_hours=6, labels="brd,architecture", tags=["brd"], checklist=[{"label": "Functional coverage", "done": True}, {"label": "NFR coverage", "done": False}])
+        _task(db, proj2.id, "Prepare route optimization demo", devops.id, description="Package route optimization demo with Redis-backed dispatch simulation.", status=TaskStatus.IN_PROGRESS, priority=TaskPriority.MEDIUM, due_date=today + timedelta(days=5), estimate_hours=12, labels="demo,redis", tags=["demo"])
+        _task(db, proj3.id, "Define FHIR entity model", intern.id, description="Draft patient, encounter, provider, and audit entities for review.", status=TaskStatus.TODO, priority=TaskPriority.HIGH, due_date=today + timedelta(days=8), estimate_hours=10, labels="database,healthcare", tags=["fhir"])
 
         brd_specs = [
             (
