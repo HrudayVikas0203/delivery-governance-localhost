@@ -82,42 +82,136 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
             raise HTTPException(status_code=502, detail="Gemini returned invalid business-flow connections.")
     elif artifact_type == "architecture":
         layers = payload.get("layers")
-        if not isinstance(layers, list) or len(layers) < 3:
-            raise HTTPException(status_code=502, detail="Gemini returned an incomplete solution architecture.")
-        for layer in layers:
-            if not isinstance(layer, dict) or not layer.get("name") or not isinstance(layer.get("components"), list) or not layer["components"]:
-                raise HTTPException(status_code=502, detail="Gemini returned an invalid solution architecture.")
-            if any(
-                not (isinstance(component, str) and component.strip())
-                and not (isinstance(component, dict) and component.get("name"))
-                for component in layer["components"]
-            ):
-                raise HTTPException(status_code=502, detail="Gemini returned architecture components without names.")
-        component_names = {
-            str(component.get("name") if isinstance(component, dict) else component).strip().lower()
-            for layer in layers
-            for component in layer.get("components", [])
-        }
-        external_systems = payload.get("external_systems", [])
-        if isinstance(external_systems, list):
-            component_names.update(
-                str(system.get("name") if isinstance(system, dict) else system).strip().lower()
-                for system in external_systems
-                if (isinstance(system, str) and system.strip()) or (isinstance(system, dict) and system.get("name"))
+
+        if not isinstance(layers, list) or len(layers) < 4:
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini returned an insufficiently detailed solution architecture.",
             )
+
+        total_components = 0
+        component_names = set()
+
+        for layer in layers:
+            if (
+                not isinstance(layer, dict)
+                or not layer.get("name")
+                or not isinstance(layer.get("components"), list)
+            ):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Gemini returned an invalid solution architecture.",
+                )
+
+            components = layer["components"]
+
+            if len(components) < 2:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Architecture layer '{layer.get('name')}' "
+                        "contains fewer than 2 meaningful components."
+                    ),
+                )
+
+            if len(components) > 8:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Architecture layer '{layer.get('name')}' "
+                        "contains too many components."
+                    ),
+                )
+
+            for component in components:
+                if isinstance(component, str):
+                    name = component.strip()
+                elif isinstance(component, dict):
+                    name = str(component.get("name") or "").strip()
+                else:
+                    name = ""
+
+                if not name:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Gemini returned an architecture component without a name.",
+                    )
+
+                normalized_name = name.lower()
+
+                if normalized_name in component_names:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Duplicate architecture component: {name}",
+                    )
+
+                component_names.add(normalized_name)
+                total_components += 1
+
+        if total_components < 12:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Gemini returned an architecture that is too shallow. "
+                    "At least 12 meaningful components are required."
+                ),
+            )
+
+        external_systems = payload.get("external_systems", [])
+
+        if isinstance(external_systems, list):
+            for system in external_systems:
+                if isinstance(system, str):
+                    name = system.strip()
+                elif isinstance(system, dict):
+                    name = str(system.get("name") or "").strip()
+                else:
+                    name = ""
+
+                if name:
+                    component_names.add(name.lower())
+
         connections = []
         for key in ("connections", "relationships"):
             if isinstance(payload.get(key), list):
                 connections.extend(payload[key])
-        if not connections:
-            raise HTTPException(status_code=502, detail="Gemini returned a solution architecture without component connections.")
+
+        if len(connections) < 8:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Gemini returned too few architecture relationships. "
+                    "At least 8 meaningful connections are required."
+                ),
+            )
+
         for connection in connections:
             if not isinstance(connection, dict):
-                raise HTTPException(status_code=502, detail="Gemini returned invalid architecture connections.")
-            source = str(connection.get("from") or connection.get("source") or "").strip().lower()
-            target = str(connection.get("to") or connection.get("target") or "").strip().lower()
+                raise HTTPException(
+                    status_code=502,
+                    detail="Gemini returned an invalid architecture connection.",
+                )
+
+            source = str(
+                connection.get("from")
+                or connection.get("source")
+                or ""
+            ).strip().lower()
+
+            target = str(
+                connection.get("to")
+                or connection.get("target")
+                or ""
+            ).strip().lower()
+
             if source not in component_names or target not in component_names:
-                raise HTTPException(status_code=502, detail="Gemini returned architecture connections with unknown components.")
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Gemini returned architecture connections "
+                        "with unknown components."
+                    ),
+                )
     return payload
 
 
@@ -207,15 +301,18 @@ def _flow_positions(nodes: list[dict], edges: list[dict]) -> dict[str, tuple[int
     node_ids = [str(node.get("id")) for node in nodes]
     incoming = {node_id: 0 for node_id in node_ids}
     outgoing = {node_id: [] for node_id in node_ids}
+
     for edge in edges:
         source, target = str(edge.get("source", "")), str(edge.get("target", ""))
         if source in outgoing and target in incoming:
             outgoing[source].append(target)
             incoming[target] += 1
+
     ranks = {node_id: 0 for node_id in node_ids}
     pending = dict(incoming)
     queue = [node_id for node_id in node_ids if pending[node_id] == 0]
     visited = set()
+
     while queue:
         node_id = queue.pop(0)
         visited.add(node_id)
@@ -224,13 +321,53 @@ def _flow_positions(nodes: list[dict], edges: list[dict]) -> dict[str, tuple[int
             pending[target] -= 1
             if pending[target] == 0:
                 queue.append(target)
+
     for node_id in node_ids:
         if node_id not in visited:
             ranks[node_id] = max(ranks.values(), default=0) + 1
+
     groups: dict[int, list[str]] = {}
     for node_id in node_ids:
         groups.setdefault(ranks[node_id], []).append(node_id)
-    return {node_id: (60 + rank * 330, 110 + row * 155) for rank, group in groups.items() for row, node_id in enumerate(group)}
+
+    # Wrap rank columns into visual bands so a business flow does not become
+    # one extremely wide horizontal strip.
+    positions: dict[str, tuple[int, int]] = {}
+    for rank, group in groups.items():
+        visual_column = rank % 3
+        visual_band = rank // 3
+
+        for row, node_id in enumerate(group):
+            positions[node_id] = (
+                80 + visual_column * 360,
+                150 + visual_band * 230 + row * 150,
+            )
+
+    return positions
+
+
+def _resolve_component_id(name: object, name_to_id: dict[str, str]) -> str | None:
+    value = str(name or "").strip().lower()
+    if not value:
+        return None
+
+    if value in name_to_id:
+        return name_to_id[value]
+
+    normalized = " ".join(value.replace("-", " ").replace("_", " ").split())
+
+    for candidate, node_id in name_to_id.items():
+        candidate_normalized = " ".join(
+            candidate.replace("-", " ").replace("_", " ").split()
+        )
+        if normalized == candidate_normalized:
+            return node_id
+
+    for candidate, node_id in name_to_id.items():
+        if normalized in candidate or candidate in normalized:
+            return node_id
+
+    return None
 
 
 def _architecture_graph(payload: dict) -> tuple[list[dict], list[dict]]:
@@ -266,10 +403,27 @@ def _architecture_graph(payload: dict) -> tuple[list[dict], list[dict]]:
     for relationship in relationships:
         if not isinstance(relationship, dict):
             continue
-        source_name = str(relationship.get("source") or relationship.get("from") or "").lower()
-        target_name = str(relationship.get("target") or relationship.get("to") or "").lower()
-        if source_name in name_to_id and target_name in name_to_id:
-            edges.append({"source": name_to_id[source_name], "target": name_to_id[target_name], "label": relationship.get("label") or relationship.get("protocol") or relationship.get("type") or ""})
+        source_id = _resolve_component_id(
+            relationship.get("source") or relationship.get("from"),
+            name_to_id,
+        )
+        target_id = _resolve_component_id(
+            relationship.get("target") or relationship.get("to"),
+            name_to_id,
+        )
+        if source_id and target_id and source_id != target_id:
+            edges.append(
+                {
+                    "source": source_id,
+                    "target": target_id,
+                    "label": (
+                        relationship.get("label")
+                        or relationship.get("protocol")
+                        or relationship.get("type")
+                        or ""
+                    ),
+                }
+            )
     return nodes, edges
 
 
@@ -900,11 +1054,46 @@ def generate_brd_asset(
             '"swimlanes":[{"name":"role or system","description":"responsibility"}],"outcome":"supported end result"}'
         )
         instructions = (
-            "Act as a senior business process architect. Create a logically complete process with one explicit start, "
-            "specific activity nodes, decision gateways only where the source supports a business rule, and one or more "
-            "explicit outcomes. Include actors, inputs, outputs, system interactions, and supported alternate or exception "
-            "paths. Decision outgoing edges must have meaningful condition labels. Every edge endpoint must reference a "
-            "node id. Use 5-12 information-rich nodes where the source permits; never use generic filler or invent policy."
+            "Act as a senior business process architect and enterprise process analyst.\n\n"
+            "Create a detailed, end-to-end business process derived strictly from the supplied BRD, "
+            "requirements and project context.\n\n"
+
+            "PROCESS DEPTH:\n"
+            "- Target 8-16 meaningful process nodes for a substantial BRD.\n"
+            "- Include one explicit START node.\n"
+            "- Include one or more INPUT nodes where business inputs enter the process.\n"
+            "- Include detailed business activities rather than generic verbs.\n"
+            "- Include DECISION nodes for meaningful business rules or approval points.\n"
+            "- Include OUTPUT nodes where meaningful business outputs are produced.\n"
+            "- Include EXCEPTION nodes for important failure, rejection, blocking or escalation scenarios supported by the BRD.\n"
+            "- Include one or more END/OUTCOME nodes.\n\n"
+
+            "ACTORS AND SYSTEMS:\n"
+            "- Every meaningful process stage should identify the responsible actor or system where supported.\n"
+            "- Show interactions between business users and systems.\n"
+            "- Do not merge distinct actors into a generic 'User' when the BRD identifies specific roles.\n\n"
+
+            "DECISIONS:\n"
+            "- Decisions must use decision nodes.\n"
+            "- Every decision must have at least two outgoing paths when the source supports them.\n"
+            "- Decision edges must have meaningful labels such as Approved, Rejected, Valid, Invalid, "
+            "Available, Unavailable, Yes or No.\n\n"
+
+            "ALTERNATE AND EXCEPTION FLOWS:\n"
+            "- Include rejection, validation failure, exception, escalation or retry paths when supported.\n"
+            "- Do not create fictional business rules.\n\n"
+
+            "TRACEABILITY:\n"
+            "- Every node must represent something supported by the BRD or project requirements.\n"
+            "- Every edge must represent an actual process transition.\n"
+            "- Do not create decorative nodes or arrows.\n\n"
+
+            "VISUAL STRUCTURE:\n"
+            "- Organize the process logically as Entry → Activities → Decisions → Alternate Paths → Outcome.\n"
+            "- Use swimlanes for distinct business roles or systems when supported.\n"
+            "- Make the resulting structure suitable for an enterprise process presentation.\n\n"
+
+            "Return only valid JSON matching the requested schema."
         )
     else:
         schema = (
@@ -922,11 +1111,73 @@ def generate_brd_asset(
             '"risks":[{"description":"risk","impact":"impact","mitigation":"mitigation"}],"so_what":"executive value"}'
         )
         instructions = (
-            "Act as a senior enterprise solution architect. Produce a client-ready architecture with distinct, correctly "
-            "ordered layers and 2-5 meaningful components per layer where supported. Separate external systems from the "
-            "solution boundary. Represent actual component-to-component data flows; connection endpoints must exactly match "
-            "component or external-system names. Include identity, security, observability, messaging, AI, data, and cloud "
-            "concerns only when supported by the supplied source. Never hard-code this application's stack or invent technology."
+            "Act as a senior enterprise solution architect and create a detailed, client-ready solution architecture "
+    "directly from the supplied BRD, project description, and requirements.\n\n"
+
+    "ARCHITECTURE DEPTH:\n"
+    "- Create 5-8 logically ordered architectural layers when the source supports them.\n"
+    "- Create 3-6 meaningful components per layer where supported.\n"
+    "- Target approximately 15-30 total components for a substantial enterprise BRD.\n"
+    "- Do not compress multiple distinct responsibilities into one generic component.\n"
+    "- Do not produce a minimal 3-layer diagram merely because it satisfies the schema.\n\n"
+
+    "LAYERS SHOULD BE SEMANTICALLY MEANINGFUL. Depending on the BRD, consider:\n"
+    "- Users / Actors / Channels\n"
+    "- Experience / Frontend\n"
+    "- API / Gateway\n"
+    "- Authentication / Authorization\n"
+    "- Core Business Services\n"
+    "- Workflow / Task / Process Services\n"
+    "- Integration / Messaging\n"
+    "- AI / Intelligence\n"
+    "- Data / Database\n"
+    "- Search / Vector / Knowledge\n"
+    "- File / Object Storage\n"
+    "- External Systems\n"
+    "- Infrastructure / Deployment\n"
+    "Only include layers actually supported by the source.\n\n"
+
+    "COMPONENT DETAIL:\n"
+    "Every component must have:\n"
+    "- unique name\n"
+    "- type\n"
+    "- specific responsibility\n"
+    "- technology only when supported by the BRD or project context\n"
+    "Avoid generic labels such as 'Backend', 'Service', or 'Database' when the BRD identifies a more specific responsibility.\n\n"
+
+    "RELATIONSHIPS:\n"
+    "- Generate explicit component-to-component data flows.\n"
+    "- Target at least 12 meaningful connections for a substantial architecture.\n"
+    "- Every connection must have valid source and target names.\n"
+    "- Describe what data, request, event, or control flows between the components.\n"
+    "- Include important cross-layer relationships, not only relationships inside one layer.\n"
+    "- Include external-system integrations when supported.\n"
+    "- Do not create decorative or imaginary arrows.\n\n"
+
+    "ARCHITECTURAL CONCERNS:\n"
+    "Where supported by the BRD, explicitly represent:\n"
+    "- authentication and authorization\n"
+    "- RBAC\n"
+    "- API gateway\n"
+    "- business services\n"
+    "- workflow/process orchestration\n"
+    "- AI/LLM services\n"
+    "- relational data\n"
+    "- vector/search storage\n"
+    "- document/file storage\n"
+    "- notifications\n"
+    "- external integrations\n"
+    "- monitoring/observability\n"
+    "- security boundaries\n"
+    "- deployment/infrastructure\n\n"
+
+    "QUALITY RULES:\n"
+    "- The diagram must tell a complete technical story from user interaction to backend processing, "
+    "business services, integrations, AI, persistence and external systems.\n"
+    "- Prefer meaningful detail over large empty boxes.\n"
+    "- Do not invent technologies, systems, vendors, APIs or business rules that are absent from the source.\n"
+    "- Use the BRD as the source of truth.\n"
+    "- Return only valid JSON matching the requested schema."
         )
     result, model_used = _gemini_json(
         f"Return only valid JSON matching this shape: {schema}\n{instructions}\n"
