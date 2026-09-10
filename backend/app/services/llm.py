@@ -155,52 +155,149 @@ def _strip_hidden_reasoning(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
 
 
-def generate_text(provider_name: str, prompt: str, model: str | None = None) -> tuple[str, str]:
+def generate_text(
+    provider_name: str,
+    prompt: str,
+    model: str | None = None,
+    max_tokens: int = 1200,
+) -> tuple[str, str]:
     settings = get_settings()
     provider = require_provider(provider_name)
+
     model_name = (
         resolve_available_groq_model(model or provider.default_model)
         if provider.name == "groq"
-        else validate_model_for_provider(provider.name, model or provider.default_model)
+        else validate_model_for_provider(
+            provider.name,
+            model or provider.default_model,
+        )
     )
 
+    # Prevent invalid or unexpectedly large values from reaching providers.
+    max_tokens = max(256, min(max_tokens, 16_384))
+
     try:
+        # ---------------------------------------------------------
+        # GROQ
+        # ---------------------------------------------------------
         if provider.name == "groq":
             from groq import Groq
 
-            with httpx.Client(timeout=25.0, trust_env=False) as http_client:
-                client = Groq(api_key=settings.groq_api_key, http_client=http_client, max_retries=2)
+            with httpx.Client(
+                timeout=60.0,
+                trust_env=False,
+            ) as http_client:
+                client = Groq(
+                    api_key=settings.groq_api_key,
+                    http_client=http_client,
+                    max_retries=2,
+                )
+
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=_messages(prompt),
                     temperature=0.2,
-                    max_tokens=1200,
+                    max_tokens=max_tokens,
                 )
-            return _strip_hidden_reasoning(response.choices[0].message.content or ""), model_name
+
+            content = ""
+
+            if response.choices:
+                message = response.choices[0].message
+                content = message.content or ""
+
+            content = _strip_hidden_reasoning(content)
+
+            if not content.strip():
+                logger.warning(
+                    "LLM provider returned empty response "
+                    "(provider=%s, model=%s).",
+                    provider.name,
+                    model_name,
+                )
+
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=(
+                        f"{provider.display_name} returned an empty response. "
+                        "Please try again."
+                    ),
+                )
+
+            return content, model_name
+
+        # ---------------------------------------------------------
+        # GEMINI
+        # ---------------------------------------------------------
         if provider.name == "gemini":
             from google import genai
             from google.genai import types
 
             client = genai.Client(
                 api_key=settings.gemini_api_key,
-                http_options=types.HttpOptions(timeout=25_000),
+                http_options=types.HttpOptions(
+                    timeout=60_000,
+                ),
             )
-            response = client.models.generate_content(model=model_name, contents=prompt)
-            return _strip_hidden_reasoning(extract_gemini_text(response)), model_name
+
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+
+            content = _strip_hidden_reasoning(
+                extract_gemini_text(response)
+            )
+
+            if not content.strip():
+                logger.warning(
+                    "LLM provider returned empty response "
+                    "(provider=%s, model=%s).",
+                    provider.name,
+                    model_name,
+                )
+
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=(
+                        f"{provider.display_name} returned an empty response. "
+                        "Please try again."
+                    ),
+                )
+
+            return content, model_name
+
     except HTTPException:
         raise
+
     except Exception as exc:
         logger.warning(
-            "LLM provider call failed (provider=%s, model=%s, error_type=%s, status=%s).",
+            "LLM provider call failed "
+            "(provider=%s, model=%s, max_tokens=%s, "
+            "error_type=%s, status=%s).",
             provider.name,
             model_name,
+            max_tokens,
             type(exc).__name__,
             getattr(exc, "status_code", None),
         )
+
         if provider.name == "groq":
             raise _safe_groq_error(exc) from None
+
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"{provider.display_name} generation failed. Please try again later.",
+            detail=(
+                f"{provider.display_name} generation failed. "
+                "Please try again later."
+            ),
         ) from None
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported LLM provider")
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Unsupported LLM provider",
+    )

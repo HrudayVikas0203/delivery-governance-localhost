@@ -134,7 +134,7 @@ def _diagram_json(prompt: str, model: str | None = None) -> tuple[dict, str, str
                 )
 
             try:
-                text, model_used = generate_text(provider, retry_prompt, provider_model)
+                text, model_used = generate_text(provider, retry_prompt, provider_model,  max_tokens=8000,)
                 return _parse_json_object(text), model_used, provider
             except HTTPException as exc:
                 last_error = exc
