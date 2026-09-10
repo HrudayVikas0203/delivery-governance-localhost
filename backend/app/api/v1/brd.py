@@ -47,35 +47,140 @@ def _json_load(value: str | None, fallback: object) -> object:
         return fallback
 
 
-def _gemini_json(prompt: str, model: str | None = None) -> tuple[dict, str]:
+def _parse_json_object(text: str) -> dict:
+    """Parse a JSON object from a model response, tolerating markdown/prose wrappers."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError("Model returned an empty response")
+
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
     try:
-        text, model_used = generate_text("gemini", prompt, model)
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
         payload = json.loads(cleaned)
-        if not isinstance(payload, dict):
-            raise ValueError("Gemini response is not an object")
-        return payload, model_used
-    except HTTPException:
-        raise
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Gemini returned an invalid structured artifact.") from exc
+    except json.JSONDecodeError:
+        start_index = cleaned.find("{")
+        if start_index < 0:
+            raise ValueError("Model response did not contain a JSON object")
+        decoder = json.JSONDecoder()
+        payload, _ = decoder.raw_decode(cleaned[start_index:])
+
+    if not isinstance(payload, dict):
+        raise ValueError("Model response is not a JSON object")
+    return payload
+
+
+def _gemini_json(prompt: str, model: str | None = None) -> tuple[dict, str]:
+    """Generate structured JSON with tolerant parsing and limited retries."""
+    last_error: Exception | None = None
+
+    for attempt in range(3):
+        retry_prompt = prompt
+        if attempt:
+            retry_prompt += (
+                "\n\nIMPORTANT RETRY: Return ONLY one valid JSON object. "
+                "No markdown fences, no explanation, no text before or after JSON. "
+                "Ensure all strings are escaped and all braces are closed."
+            )
+        try:
+            text, model_used = generate_text("gemini", retry_prompt, model)
+            return _parse_json_object(text), model_used
+        except HTTPException as exc:
+            last_error = exc
+            if exc.status_code in {400, 401, 403}:
+                raise
+        except (ValueError, json.JSONDecodeError) as exc:
+            last_error = exc
+
+    if isinstance(last_error, HTTPException):
+        raise last_error
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Gemini returned an invalid structured artifact after multiple attempts.",
+    ) from last_error
+
+
+def _diagram_json(prompt: str, model: str | None = None) -> tuple[dict, str, str]:
+    """
+    Robust diagram generation:
+    Gemini is tried first, then the configured Groq model is used as a fallback.
+    Each provider gets up to three attempts. The saved artifact records the
+    actual provider used.
+    """
+    settings = get_settings()
+    providers: list[tuple[str, str | None]] = [
+        ("gemini", model),
+        ("groq", getattr(settings, "groq_default_model", None)),
+    ]
+    last_error: Exception | None = None
+
+    for provider, provider_model in providers:
+        if provider == "groq" and not getattr(settings, "groq_api_key", None):
+            continue
+
+        for attempt in range(3):
+            retry_prompt = prompt
+            if attempt:
+                retry_prompt += (
+                    "\n\nIMPORTANT RETRY: Return ONLY one valid JSON object. "
+                    "No markdown, no code fences, no explanation. "
+                    "Use the exact requested schema and make every endpoint "
+                    "reference an existing node/component."
+                )
+
+            try:
+                text, model_used = generate_text(provider, retry_prompt, provider_model)
+                return _parse_json_object(text), model_used, provider
+            except HTTPException as exc:
+                last_error = exc
+                if exc.status_code in {400, 401, 403}:
+                    break
+            except (ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+
+    if isinstance(last_error, HTTPException):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Diagram generation failed. Gemini and the configured Groq "
+                "fallback could not produce a valid structured response."
+            ),
+        ) from last_error
+
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Diagram generation failed because the AI providers returned no usable structured response.",
+    ) from last_error
 
 
 def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
     if artifact_type == "business_flow":
         nodes = payload.get("nodes")
         edges = payload.get("edges")
-        if not isinstance(nodes, list) or len(nodes) < 3 or not isinstance(edges, list) or len(edges) < 2:
+        if (
+            not isinstance(nodes, list)
+            or len(nodes) < 3
+            or not isinstance(edges, list)
+            or len(edges) < 2
+        ):
             raise HTTPException(status_code=502, detail="Gemini returned an incomplete business flow.")
+
         node_ids = {
             str(node.get("id"))
             for node in nodes
             if isinstance(node, dict) and node.get("id") and node.get("label")
         }
         valid_edges = [edge for edge in edges if isinstance(edge, dict)]
-        if len(node_ids) != len(nodes) or len(valid_edges) != len(edges) or any(
+
+        if len(node_ids) != len(nodes) or len(valid_edges) != len(edges):
+            raise HTTPException(status_code=502, detail="Gemini returned invalid business-flow nodes or connections.")
+
+        if any(
             edge.get("source") not in node_ids or edge.get("target") not in node_ids
             for edge in valid_edges
         ):
@@ -83,17 +188,8 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
 
     elif artifact_type == "architecture":
         layers = payload.get("layers")
-
-        # Keep validation focused on structural correctness. The stronger
-        # Gemini prompt requests a detailed architecture, but valid smaller
-        # BRDs should not fail simply because they contain fewer components.
         if not isinstance(layers, list) or len(layers) < 3:
-            raise HTTPException(
-                status_code=502,
-                detail="Gemini returned an incomplete solution architecture.",
-            )
-
-        component_names = set()
+            raise HTTPException(status_code=502, detail="Gemini returned an incomplete solution architecture.")
 
         for layer in layers:
             if (
@@ -102,81 +198,116 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
                 or not isinstance(layer.get("components"), list)
                 or not layer["components"]
             ):
-                raise HTTPException(
-                    status_code=502,
-                    detail="Gemini returned an invalid solution architecture.",
-                )
-
-            if any(
-                not (isinstance(component, str) and component.strip())
-                and not (isinstance(component, dict) and component.get("name"))
-                for component in layer["components"]
-            ):
-                raise HTTPException(
-                    status_code=502,
-                    detail="Gemini returned architecture components without names.",
-                )
+                raise HTTPException(status_code=502, detail="Gemini returned an invalid solution architecture.")
 
             for component in layer["components"]:
-                name = (
-                    component.get("name")
-                    if isinstance(component, dict)
-                    else component
-                )
-                if name:
-                    component_names.add(str(name).strip().lower())
+                name = component.get("name") if isinstance(component, dict) else component
+                if not str(name or "").strip():
+                    raise HTTPException(status_code=502, detail="Gemini returned architecture components without names.")
 
-        external_systems = payload.get("external_systems", [])
-        if isinstance(external_systems, list):
-            component_names.update(
-                str(system.get("name") if isinstance(system, dict) else system)
-                .strip()
-                .lower()
-                for system in external_systems
-                if (
-                    (isinstance(system, str) and system.strip())
-                    or (isinstance(system, dict) and system.get("name"))
-                )
-            )
+        if payload.get("external_systems") is not None and not isinstance(payload.get("external_systems"), list):
+            raise HTTPException(status_code=502, detail="Gemini returned invalid external-system data.")
 
-        connections = []
         for key in ("connections", "relationships"):
-            if isinstance(payload.get(key), list):
-                connections.extend(payload[key])
-
-        if not connections:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Gemini returned a solution architecture "
-                    "without component connections."
-                ),
-            )
-
-        for connection in connections:
-            if not isinstance(connection, dict):
-                raise HTTPException(
-                    status_code=502,
-                    detail="Gemini returned invalid architecture connections.",
-                )
-
-            source = str(
-                connection.get("from") or connection.get("source") or ""
-            ).strip().lower()
-            target = str(
-                connection.get("to") or connection.get("target") or ""
-            ).strip().lower()
-
-            if source not in component_names or target not in component_names:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Gemini returned architecture connections "
-                        "with unknown components."
-                    ),
-                )
+            value = payload.get(key)
+            if value is not None and not isinstance(value, list):
+                raise HTTPException(status_code=502, detail="Gemini returned invalid architecture connection data.")
 
     return payload
+
+
+def _normalize_architecture_payload(payload: dict) -> dict:
+    """Canonicalize architecture names and guarantee renderable connections."""
+    normalized = dict(payload)
+    layers = normalized.get("layers") or []
+
+    def norm(value: object) -> str:
+        return " ".join(
+            str(value or "").strip().lower().replace("-", " ").replace("_", " ").split()
+        )
+
+    lookup: dict[str, str] = {}
+    layer_first_components: list[str] = []
+
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        first_in_layer = None
+        for component in layer.get("components", []):
+            name = component.get("name") if isinstance(component, dict) else component
+            name = str(name or "").strip()
+            if not name:
+                continue
+            lookup[norm(name)] = name
+            if first_in_layer is None:
+                first_in_layer = name
+        if first_in_layer:
+            layer_first_components.append(first_in_layer)
+
+    for system in normalized.get("external_systems", []) or []:
+        name = system.get("name") if isinstance(system, dict) else system
+        name = str(name or "").strip()
+        if name:
+            lookup[norm(name)] = name
+
+    def resolve(value: object) -> str | None:
+        key = norm(value)
+        if not key:
+            return None
+        if key in lookup:
+            return lookup[key]
+        for candidate, canonical in lookup.items():
+            if key in candidate or candidate in key:
+                return canonical
+        return None
+
+    raw = []
+    for key in ("connections", "relationships"):
+        if isinstance(normalized.get(key), list):
+            raw.extend(normalized[key])
+
+    connections = []
+    seen = set()
+
+    for relationship in raw:
+        if not isinstance(relationship, dict):
+            continue
+        source = resolve(relationship.get("from") or relationship.get("source"))
+        target = resolve(relationship.get("to") or relationship.get("target"))
+        if not source or not target or source == target:
+            continue
+        label = str(
+            relationship.get("label")
+            or relationship.get("protocol")
+            or relationship.get("type")
+            or ""
+        ).strip()
+        key = (source.lower(), target.lower(), label.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        connections.append({
+            "from": source,
+            "to": target,
+            "label": label,
+            "protocol": relationship.get("protocol") or "",
+        })
+
+    # If Gemini supplied no usable edges, connect adjacent architectural layers.
+    # This does not create new components or technologies.
+    if not connections:
+        for source, target in zip(layer_first_components, layer_first_components[1:]):
+            if source != target:
+                connections.append({
+                    "from": source,
+                    "to": target,
+                    "label": "request / data flow",
+                    "protocol": "",
+                })
+
+    normalized["connections"] = connections
+    normalized.pop("relationships", None)
+    return normalized
 
 
 def _extract_document_text(content: bytes, filename: str) -> str:
@@ -1141,9 +1272,9 @@ def generate_brd_asset(
     "- Prefer meaningful detail over large empty boxes.\n"
     "- Do not invent technologies, systems, vendors, APIs or business rules that are absent from the source.\n"
     "- Use the BRD as the source of truth.\n"
-    "- Return only valid JSON matching the requested schema."
+    "- Return ONLY one valid JSON object matching the requested schema. No markdown, no code fences, no commentary."
         )
-    result, model_used = _gemini_json(
+    result, model_used, provider_used = _diagram_json(
         f"Return only valid JSON matching this shape: {schema}\n{instructions}\n"
         f"Project: {project.name}\nDescription: {project.description or ''}\n"
         f"Requirements: {json.dumps(req_payload, ensure_ascii=False)[:12000]}\n"
@@ -1151,6 +1282,10 @@ def generate_brd_asset(
         f"Additional prompt: {(payload.prompt or '')[:2000]}",
         payload.model,
     )
+
+    if payload.artifact_type == "architecture":
+        result = _normalize_architecture_payload(result)
+
     result = _validate_diagram_payload(payload.artifact_type, result)
     created = create_artifact(
         BRDArtifactCreate(
