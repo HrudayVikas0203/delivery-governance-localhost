@@ -8,6 +8,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings, resolve_app_path
@@ -511,18 +512,56 @@ async def upload_document(
 ) -> BRDDocument:
     project = db.get(Project, project_id)
     project = require_project_access(db, actor, project)
-    require_project_manager(actor, project, db.get(Account, project.account_id))
+    require_project_manager(
+        actor,
+        project,
+        db.get(Account, project.account_id),
+    )
 
     settings = get_settings()
-    storage_dir = resolve_app_path(str(settings.report_dir.parent / "brd" / project_id))
+    storage_dir = resolve_app_path(
+        str(settings.report_dir.parent / "brd" / project_id)
+    )
     storage_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_filename = Path(file.filename or "uploaded-brd").name
+    if not safe_filename.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="The selected BRD file does not have a valid filename.",
+        )
+
+    # Give the user a useful response instead of allowing the database
+    # UNIQUE(project_id, filename) constraint to become an HTTP 500.
+    existing_document = db.scalar(
+        select(BRDDocument).where(
+            BRDDocument.project_id == project_id,
+            BRDDocument.filename == safe_filename,
+        )
+    )
+    if existing_document:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"A BRD document named '{safe_filename}' already exists "
+                "for this project. Please rename the file before uploading it."
+            ),
+        )
+
     content = await file.read(10 * 1024 * 1024 + 1)
     if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="BRD file exceeds the 10 MB limit")
-    safe_filename = Path(file.filename or "uploaded-brd").name
+        raise HTTPException(
+            status_code=413,
+            detail="BRD file exceeds the 10 MB limit",
+        )
     if not content:
-        raise HTTPException(status_code=422, detail="The selected BRD file is empty.")
+        raise HTTPException(
+            status_code=422,
+            detail="The selected BRD file is empty.",
+        )
+
     extracted_text = _extract_document_text(content, safe_filename)
+
     document = BRDDocument(
         project_id=project_id,
         filename=safe_filename,
@@ -534,13 +573,47 @@ async def upload_document(
         extracted_text=extracted_text,
     )
     db.add(document)
-    db.flush()
+
+    try:
+        # The database constraint remains the final protection against
+        # simultaneous duplicate uploads.
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        error_text = str(exc)
+        if "brd_documents.project_id" in error_text and "filename" in error_text:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"A BRD document named '{safe_filename}' already exists "
+                    "for this project. Please rename the file before uploading it."
+                ),
+            ) from exc
+        raise
+
     target = storage_dir / f"{document.id}_{document.filename}"
-    target.write_bytes(content)
-    document.storage_path = str(target)
-    audit(db, actor.id, "BRD Uploaded", "BRD Studio", f"BRD {document.filename} uploaded for {project.name}")
-    db.commit()
-    db.refresh(document)
+    try:
+        target.write_bytes(content)
+        document.storage_path = str(target)
+
+        audit(
+            db,
+            actor.id,
+            "BRD Uploaded",
+            "BRD Studio",
+            f"BRD {document.filename} uploaded for {project.name}",
+        )
+        db.commit()
+        db.refresh(document)
+    except Exception:
+        db.rollback()
+        try:
+            if target.exists():
+                target.unlink()
+        except OSError:
+            pass
+        raise
+
     return _hydrate_document(document, db)
 
 
