@@ -80,16 +80,19 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
             for edge in valid_edges
         ):
             raise HTTPException(status_code=502, detail="Gemini returned invalid business-flow connections.")
+
     elif artifact_type == "architecture":
         layers = payload.get("layers")
 
-        if not isinstance(layers, list) or len(layers) < 4:
+        # Keep validation focused on structural correctness. The stronger
+        # Gemini prompt requests a detailed architecture, but valid smaller
+        # BRDs should not fail simply because they contain fewer components.
+        if not isinstance(layers, list) or len(layers) < 3:
             raise HTTPException(
                 status_code=502,
-                detail="Gemini returned an insufficiently detailed solution architecture.",
+                detail="Gemini returned an incomplete solution architecture.",
             )
 
-        total_components = 0
         component_names = set()
 
         for layer in layers:
@@ -97,91 +100,56 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
                 not isinstance(layer, dict)
                 or not layer.get("name")
                 or not isinstance(layer.get("components"), list)
+                or not layer["components"]
             ):
                 raise HTTPException(
                     status_code=502,
                     detail="Gemini returned an invalid solution architecture.",
                 )
 
-            components = layer["components"]
-
-            if len(components) < 2:
+            if any(
+                not (isinstance(component, str) and component.strip())
+                and not (isinstance(component, dict) and component.get("name"))
+                for component in layer["components"]
+            ):
                 raise HTTPException(
                     status_code=502,
-                    detail=(
-                        f"Architecture layer '{layer.get('name')}' "
-                        "contains fewer than 2 meaningful components."
-                    ),
+                    detail="Gemini returned architecture components without names.",
                 )
 
-            if len(components) > 8:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        f"Architecture layer '{layer.get('name')}' "
-                        "contains too many components."
-                    ),
+            for component in layer["components"]:
+                name = (
+                    component.get("name")
+                    if isinstance(component, dict)
+                    else component
                 )
-
-            for component in components:
-                if isinstance(component, str):
-                    name = component.strip()
-                elif isinstance(component, dict):
-                    name = str(component.get("name") or "").strip()
-                else:
-                    name = ""
-
-                if not name:
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Gemini returned an architecture component without a name.",
-                    )
-
-                normalized_name = name.lower()
-
-                if normalized_name in component_names:
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"Duplicate architecture component: {name}",
-                    )
-
-                component_names.add(normalized_name)
-                total_components += 1
-
-        if total_components < 12:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Gemini returned an architecture that is too shallow. "
-                    "At least 12 meaningful components are required."
-                ),
-            )
+                if name:
+                    component_names.add(str(name).strip().lower())
 
         external_systems = payload.get("external_systems", [])
-
         if isinstance(external_systems, list):
-            for system in external_systems:
-                if isinstance(system, str):
-                    name = system.strip()
-                elif isinstance(system, dict):
-                    name = str(system.get("name") or "").strip()
-                else:
-                    name = ""
-
-                if name:
-                    component_names.add(name.lower())
+            component_names.update(
+                str(system.get("name") if isinstance(system, dict) else system)
+                .strip()
+                .lower()
+                for system in external_systems
+                if (
+                    (isinstance(system, str) and system.strip())
+                    or (isinstance(system, dict) and system.get("name"))
+                )
+            )
 
         connections = []
         for key in ("connections", "relationships"):
             if isinstance(payload.get(key), list):
                 connections.extend(payload[key])
 
-        if len(connections) < 8:
+        if not connections:
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "Gemini returned too few architecture relationships. "
-                    "At least 8 meaningful connections are required."
+                    "Gemini returned a solution architecture "
+                    "without component connections."
                 ),
             )
 
@@ -189,19 +157,14 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
             if not isinstance(connection, dict):
                 raise HTTPException(
                     status_code=502,
-                    detail="Gemini returned an invalid architecture connection.",
+                    detail="Gemini returned invalid architecture connections.",
                 )
 
             source = str(
-                connection.get("from")
-                or connection.get("source")
-                or ""
+                connection.get("from") or connection.get("source") or ""
             ).strip().lower()
-
             target = str(
-                connection.get("to")
-                or connection.get("target")
-                or ""
+                connection.get("to") or connection.get("target") or ""
             ).strip().lower()
 
             if source not in component_names or target not in component_names:
@@ -212,6 +175,7 @@ def _validate_diagram_payload(artifact_type: str, payload: dict) -> dict:
                         "with unknown components."
                     ),
                 )
+
     return payload
 
 
